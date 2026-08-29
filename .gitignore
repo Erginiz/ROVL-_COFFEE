@@ -1,0 +1,13 @@
+# Bagimliliklar ve uretilen dosyalar — depoya girmemeli (yarim GB'i asar)
+node_modules/
+dist/
+release/
+
+# Kafenin kendi verisi: muzik, reklamlar, ayarlar, yonetici kodu, sertifikalar.
+# Bunlar asla paylasilmaz.
+data/
+
+# Yerel gecici dosyalar
+*.log
+.DS_Store
+Thumbs.db
