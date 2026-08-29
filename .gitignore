@@ -11,3 +11,8 @@ data/
 *.log
 .DS_Store
 Thumbs.db
+
+# Bozuk kabuk komutlarindan olusan cop dosyalar (proje kokunde birikiyordu)
+/[{}']*
+/console.log*
+/*.id
