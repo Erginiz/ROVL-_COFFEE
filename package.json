@@ -47,8 +47,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "DEPO-SAHIBI",
-        "repo": "rovli-radyo",
+        "owner": "Erginiz",
+        "repo": "ROVL-_COFFEE",
         "releaseType": "release"
       }
     ],
