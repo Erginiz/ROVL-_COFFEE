@@ -10,6 +10,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { startServer, makeTone, waitFor, sleep } = require('../helpers/harness.cjs')
+const { measureBroadcast } = require('../helpers/audio-analysis.cjs')
 
 // One chunk of s16le mono PCM, shaped exactly the way the browser sends it: a loud tone, so
 // its arrival is measurable in the encoded output.
@@ -150,4 +151,55 @@ test('anons açıkken istasyon kapatılırsa köprü de kapanır', { timeout: 18
     { timeoutMs: 20000, intervalMs: 400, label: 'tüm ffmpeg süreçleri kapandı' })
   assert.deepEqual(children.filter(c => pidAlive(c.pid)).map(c => c.pid), [],
     'anons açıkken kapanışta süreç kalmamalı')
+})
+
+// The existing ducking test asserts that the NUMBER was stored and that bytes still flow.
+// Both would be true if the setting were wired to nothing at all — and the mixer's own unit
+// test says in its comment that "the ducking is folded into the music gain by the caller",
+// which is precisely the wiring nothing checked. This measures the music instead.
+test('kısma gerçekten duyulur — ayar mikserle bağlı', { timeout: 300000 }, async t => {
+  const server = await startServer({ music: [makeTone(120, 440)] })
+  t.after(() => server.stop())
+  await server.play()
+
+  const meter = server.listen()
+  t.after(() => meter.close())
+  await waitFor(() => meter.status === 200, { label: '/live.mp3' })
+
+  const normal = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > 0.05 ? measured : null
+  }, { timeoutMs: 40000, intervalMs: 0, label: 'müzik akmaya başlasın' })
+
+  // The engine turns the music down only once audio actually arrives — deliberately, or the
+  // room would go quiet before anyone spoke. So the announcement has to be fed for real.
+  // It is fed SILENCE: the ducked music is then the only thing in the mix, and the
+  // measurement says what happened to it rather than what a test tone added on top.
+  await server.api('/api/settings', 'PATCH', { microphone: { ducking: 90 } })
+  await server.api('/api/control', 'POST', { action: 'microphoneStart', value: 48000 })
+  let speaking = true
+  const feed = (async () => {
+    while (speaking) {
+      await server.raw('/api/mic/chunk', 'POST', pcmTone({ amplitude: 0 }), micHeaders)
+      await sleep(60)
+    }
+  })()
+  await sleep(1500)                       // köprü kurulsun ve kısma otursun
+  const ducked = await measureBroadcast(server.port, 4)
+  speaking = false
+  await feed
+
+  assert.ok(ducked.rms < normal.rms * 0.5,
+    `anons açıkken müzik belirgin kısılmalı: ${normal.rms.toFixed(4)} -> ${ducked.rms.toFixed(4)}`)
+
+  // And it must come back — the same claim the old test made with a byte count, which a
+  // station stuck at 10% volume would have satisfied perfectly.
+  await server.api('/api/control', 'POST', { action: 'microphoneStop' })
+  const restored = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > normal.rms * 0.7 ? measured : null
+  }, { timeoutMs: 40000, intervalMs: 0, label: 'seviye geri gelsin' })
+
+  assert.ok(restored.rms > normal.rms * 0.7,
+    `anons bitince seviye geri gelmeli: ${normal.rms.toFixed(4)} -> ${restored.rms.toFixed(4)}`)
 })
