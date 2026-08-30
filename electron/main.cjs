@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu } = require('electron')
+const { app, BrowserWindow, Menu, dialog } = require('electron')
 const path = require('path')
 
 // ── Uygulama içi güncelleme ──────────────────────────────────────────────────
@@ -125,7 +125,18 @@ if (!app.requestSingleInstanceLock()) {
       setupUpdater()
       server = startServer({ updater })
       server.once('listening', createWindow)
-      server.once('error', createWindow)
+      // A station that could not take its port serves nothing: the panel would open onto a
+      // page that never loads, and the phones would get "connection refused" with the café
+      // left guessing. The panel itself cannot report this — it is served BY the thing that
+      // failed — so say it in the only place left, a dialog.
+      server.once('error', error => {
+        const message = error?.code === 'EADDRINUSE'
+          ? `Rovli Radyo zaten çalışıyor olabilir.\n\nPort ${process.env.PORT || 8090} başka bir program tarafından kullanılıyor. ` +
+            'Görev Yöneticisi\'nde açık bir "Rovli Radyo" varsa kapatıp yeniden başlatın.'
+          : `Rovli Radyo başlatılamadı.\n\n${error?.message || error}`
+        try { dialog.showErrorBox('Rovli Radyo başlatılamadı', message) } catch {}
+        createWindow()
+      })
     }
     app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow())
   })

@@ -60,6 +60,8 @@ const MAX_ADS_EVERY = 500
 // Also bounds the arithmetic: `Date.now() + minutes * 60000` must stay inside the range a
 // Date can represent, or toISOString() throws and the stored schedule is corrupted.
 const MAX_TIMED_MINUTES = 24 * 60
+// How many times a file that cannot be read is re-probed before the station stops trying.
+const MAX_PROBE_ATTEMPTS = 3
 
 for (const directory of [root, certDir, ...Object.values(mediaRoots)]) fs.mkdirSync(directory, { recursive: true })
 
@@ -975,10 +977,30 @@ async function runScan() {
         state[key].push(item)
         changed = true
       }
+      // Fill in durations that are still missing — but GIVE UP on a file that keeps failing.
+      // Retrying forever meant a single unreadable file spawned an ffmpeg every 15 seconds
+      // for the life of the station (each with a 15-second ceiling of its own) and marked the
+      // library as changed every time, fanning a full state broadcast out to every phone.
+      // A file that cannot be read three times running is not going to start working.
       for (const item of state[key]) {
         if (item.durationSeconds) continue
+        if ((item.probeFailures || 0) >= MAX_PROBE_ATTEMPTS) continue
         const filePath = path.join(dir, item.filename)
-        if (fs.existsSync(filePath)) { item.durationSeconds = await probeDuration(filePath); changed = true }
+        if (!fs.existsSync(filePath)) continue
+        const duration = await probeDuration(filePath)
+        if (duration) {
+          item.durationSeconds = duration
+          delete item.probeFailures
+          changed = true
+        } else {
+          item.probeFailures = (item.probeFailures || 0) + 1
+          changed = true
+          // Say it once, when we stop trying. Until now a broken file was simply a track that
+          // never played, with nothing anywhere explaining why.
+          if (item.probeFailures >= MAX_PROBE_ATTEMPTS) {
+            log('system', `Dosya okunamıyor, atlanacak: ${item.title}`)
+          }
+        }
       }
       // Loudness analysis decodes the whole file, so it is deliberately rationed: a few
       // tracks per pass, and only after durations are filled in (playback order depends
@@ -1313,7 +1335,24 @@ async function ensureCerts() {
 // report that honestly instead of pretending.
 function startServer({ updater } = {}) {
   appUpdater = updater || null
-  const httpServer = app.listen(port, '0.0.0.0', () => console.log(`Rovli Radyo API http://127.0.0.1:${port}`))
+  // `exclusive: true` matters on Windows. Without it two processes can BOTH bind this port —
+  // the second one even logs that it started — and incoming connections are then handed to
+  // one of them unpredictably. Two stations end up running, each with its own encoder, each
+  // believing it is fine, while phones reach whichever socket the OS picked. Measured: a
+  // second instance bound 0.0.0.0:8090 without complaint. Refusing the bind turns that into
+  // an error we can report instead of a mystery in the café.
+  const httpServer = app.listen({ port, host: '0.0.0.0', exclusive: true },
+    () => console.log(`Rovli Radyo API http://127.0.0.1:${port}`))
+  // Without this handler a failed bind is an unhandled 'error' event. The desktop app catches
+  // it only to open its window anyway, so the panel appeared over a station that was not
+  // listening at all — and nothing on screen said why.
+  httpServer.on('error', error => {
+    const message = error?.code === 'EADDRINUSE'
+      ? `Port ${port} zaten kullanımda. Rovli Radyo'nun başka bir kopyası açık olabilir — Görev Yöneticisi'nden kapatıp tekrar deneyin.`
+      : `Sunucu başlatılamadı: ${error?.message}`
+    console.error(message)
+    httpServer.startupError = message
+  })
   // Also serve HTTPS (self-signed) so phones get a secure context for the mic. Generating
   // a key takes a moment, so HTTPS comes up slightly after HTTP rather than blocking it —
   // the Electron window waits on the HTTP listener, which is already live.
@@ -1323,7 +1362,8 @@ function startServer({ updater } = {}) {
     if (shuttingDown) return
     httpsServer = https.createServer(creds, app)
     httpsServer.on('error', error => console.error('HTTPS sunucu hatası:', error.message))
-    httpsServer.listen(httpsPort, '0.0.0.0', () => console.log(`Rovli Radyo HTTPS https://127.0.0.1:${httpsPort}`))
+    httpsServer.listen({ port: httpsPort, host: '0.0.0.0', exclusive: true },
+      () => console.log(`Rovli Radyo HTTPS https://127.0.0.1:${httpsPort}`))
   }).catch(error => console.error('HTTPS başlatılamadı:', error.message))
   const shutdown = () => {
     shuttingDown = true
@@ -1348,5 +1388,12 @@ function startServer({ updater } = {}) {
   return httpServer
 }
 
-if (require.main === module) startServer()
+if (require.main === module) {
+  const server = startServer()
+  // Started directly (npm start, or a stray second copy): a station that could not take its
+  // port must not linger half-alive. Lingering is how two instances end up "running" at once,
+  // with the operator unable to tell which one the phones are reaching. The desktop app does
+  // not take this path — it handles the same event itself so it can show a dialog first.
+  server.on('error', () => process.exit(1))
+}
 module.exports = { startServer }
