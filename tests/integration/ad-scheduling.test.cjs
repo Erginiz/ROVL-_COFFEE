@@ -173,3 +173,44 @@ test('reklam ekranda değil, hoparlörde çalar', { timeout: 300000 }, async t =
   }, { timeoutMs: 90000, intervalMs: 0, label: 'müziğe dönülsün' })
   assert.ok(backToMusic.frequency < 700, `reklam bitince müzik dönmeli, ölçülen: ${Math.round(backToMusic.frequency)} Hz`)
 })
+
+// Two sliders, and nothing anywhere checked that each one moves the thing it is labelled for.
+// The station has already been found twice with a setting wired to nothing, and this is the
+// pair most likely to be confused in code: the wrong one would mean the operator turns ads
+// down and the café hears no difference at all.
+//
+// Measured on ONE ad, mid-play, so nothing but the setting changes between readings.
+test('reklam sesi kaydırıcısı reklamı etkiler, müzik kaydırıcısı etkilemez', { timeout: 300000 }, async t => {
+  const server = await startServer({ music: [makeTone(180, 300)], ads: [makeTone(90, 1200)] })
+  t.after(() => server.stop())
+
+  await server.api('/api/control', 'POST', { action: 'musicVolume', value: 100 })
+  await server.api('/api/control', 'POST', { action: 'adVolume', value: 100 })
+  await server.play()
+  await waitFor(async () => (await server.state()).current, { label: 'yayın başlasın' })
+
+  await server.api('/api/control', 'POST', { action: 'manualAd' })
+  const loudAd = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.frequency > 700 && measured.rms > 0.05 ? measured : null
+  }, { timeoutMs: 60000, intervalMs: 0, label: 'reklam duyulsun' })
+
+  // Same ad, still playing. Only the ad slider moves.
+  await server.api('/api/control', 'POST', { action: 'adVolume', value: 25 })
+  const quietAd = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.frequency > 700 ? measured : null
+  }, { timeoutMs: 30000, intervalMs: 0, label: 'kısılmış reklam ölçülsün' })
+  assert.ok(quietAd.rms < loudAd.rms * 0.6,
+    `reklam sesi kısılmalı: ${loudAd.rms.toFixed(4)} -> ${quietAd.rms.toFixed(4)}`)
+
+  // And the music slider must not touch it — this is the assertion that proves the two
+  // knobs are not crossed, which no amount of reading the state could show.
+  await server.api('/api/control', 'POST', { action: 'musicVolume', value: 5 })
+  const stillQuiet = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.frequency > 700 ? measured : null
+  }, { timeoutMs: 30000, intervalMs: 0, label: 'reklam ölçülsün' })
+  assert.ok(Math.abs(stillQuiet.rms - quietAd.rms) < quietAd.rms * 0.5,
+    `müzik kaydırıcısı reklamı değiştirmemeli: ${quietAd.rms.toFixed(4)} -> ${stillQuiet.rms.toFixed(4)}`)
+})
