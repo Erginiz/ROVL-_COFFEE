@@ -1139,7 +1139,7 @@ app.post('/api/media/:kind', requireAdmin, (req, res, next) => {
   // folder, while the tool that exported it may have left 'Track 1' inside. There is no rename
   // here, so a tag winning would replace a deliberate name with junk and leave no way back.
   const title = (kind === 'ad' ? null : probed.title) || path.parse(req.file.originalname).name
-  const item = { id: crypto.randomUUID(), title, artist: probed.artist || 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: probed.durationSeconds, gainDb: await probeLoudness(req.file.path) ?? 0, addedAt: new Date().toISOString() }
+  const item = { id: crypto.randomUUID(), title, artist: probed.artist || 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: probed.durationSeconds, tagsRead: true, gainDb: await probeLoudness(req.file.path) ?? 0, addedAt: new Date().toISOString() }
   // The file is on disk before the two ffmpeg probes above run, so a folder scan during
   // that second or two sees it, finds no library entry, and adds one of its own — then this
   // handler added a SECOND entry for the same file. Both survive pruning (the file exists),
@@ -1238,7 +1238,7 @@ async function runScan() {
         if (state[key].some(item => item.filename === filename)) continue
         const probed = await probeFile(path.join(dir, filename))
         const useTags = key !== 'ads'          // reklamlar operatörün verdiği adı korur
-        const item = { id: crypto.randomUUID(), title: (useTags && probed.title) || path.parse(filename).name, artist: (useTags && probed.artist) || 'Bilinmeyen sanatçı', filename, durationSeconds: probed.durationSeconds, addedAt: new Date().toISOString() }
+        const item = { id: crypto.randomUUID(), title: (useTags && probed.title) || path.parse(filename).name, artist: (useTags && probed.artist) || 'Bilinmeyen sanatçı', filename, durationSeconds: probed.durationSeconds, tagsRead: true, addedAt: new Date().toISOString() }
         // Re-check after the await. Probing yields for a second or so, and an upload of this
         // very file can land its own entry in that gap — the check above was made against a
         // library that no longer exists. Skipping here is what keeps the track from being
