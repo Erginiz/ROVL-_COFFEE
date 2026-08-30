@@ -161,3 +161,30 @@ test('etiketi olmayan eski kayıt sonsuza dek yeniden okunmaz', { timeout: 18000
   assert.equal(track.tagsRead, true, 'okunduğu işaretlenmeli')
   assert.equal(track.title, 'track-0', 'etiketsiz dosya adını korumalı')
 })
+
+test('etiket doldurma fırtınası sırasında ses kesilmez', { timeout: 300000 }, async t => {
+  // The back-fill spawns up to eight ffmpeg processes per scan pass, every fifteen seconds,
+  // until the library is done. On the café's two hundred songs that is several minutes of
+  // sustained extra load right after an update — competing with the encoder for a modest PC.
+  // Measured rather than assumed, because "it should be fine, the probes are child processes"
+  // is exactly the kind of reasoning this project has been wrong about before.
+  const many = Array.from({ length: 30 }, (_, i) => makeTone(4, 200 + i * 17))
+  const server = await startServer({ music: many })
+  t.after(() => server.stop())
+
+  const meter = server.listen()
+  t.after(() => meter.close())
+  await waitFor(() => meter.status === 200, { label: '/live.mp3' })
+  await server.play()
+
+  // Straddle several scan passes, so the measurement covers the back-fill at full tilt.
+  const samples = []
+  for (let i = 0; i < 5; i++) samples.push(await meter.sample(4000))
+
+  const worst = Math.min(...samples)
+  assert.ok(worst > 20000, `en kötü 4 saniyede ${worst} bayt — yayın sekmiş olabilir (örnekler: ${samples.join(', ')})`)
+
+  // And the work must actually have been happening, or the test proves nothing.
+  const done = (await server.state()).music.filter(track => track.tagsRead).length
+  assert.ok(done > 0, 'ölçüm sırasında etiket doldurma çalışmış olmalı')
+})
