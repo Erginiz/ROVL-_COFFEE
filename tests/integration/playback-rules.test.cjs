@@ -8,6 +8,7 @@ const assert = require('node:assert')
 const fs = require('fs')
 const path = require('path')
 const { startServer, makeTone, waitFor, sleep } = require('../helpers/harness.cjs')
+const { measureBroadcast } = require('../helpers/audio-analysis.cjs')
 
 // Boot a server against a seeded station.json. The first boot is only there to let the
 // scanner discover the real files; `build` then receives that scanned state so a test can
@@ -292,4 +293,61 @@ test('müzik eklenince çalma yeniden denenebilir', async t => {
   await sleep(1500)
 
   assert.ok(await countNotices() > before, 'kütüphane yeniden boşalınca tekrar bildirilmeli')
+})
+
+// The whole ezan feature, measured where the café actually experiences it: in the sound.
+// Everything about it has been tested through `ezan.active` and `playback.status` until now —
+// and "the state says playing" is precisely the lie this project keeps uncovering. A pause
+// that leaves the speakers running, or a window that ends with the music never coming back,
+// would pass every existing ezan test.
+test('ezan vaktinde ses gerçekten susar ve sonra gerçekten geri gelir', { timeout: 300000 }, async t => {
+  const now = new Date()
+  // A window that opens in a few seconds and lasts one minute — the shortest the station
+  // accepts, so the test lives through a complete cycle rather than half of one.
+  const soon = new Date(now.getTime() + 8000)
+  const hhmm = `${String(soon.getHours()).padStart(2, '0')}:${String(soon.getMinutes()).padStart(2, '0')}`
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+
+  const { server } = await bootWith(scanned => ({
+    playback: { ...scanned.playback, status: 'playing', currentId: scanned.music[0].id, currentType: 'music' },
+    ezan: {
+      enabled: true, il: 'İstanbul', ilce: '', durationMinutes: 1,
+      active: false, activePrayer: null, activeUntil: null, prevStatus: null, overrideUntil: null,
+      times: { 'Öğle': hhmm }, timesDate: todayStr, lastError: null
+    }
+  }), { music: [makeTone(240)] })
+  t.after(() => server.stop())
+
+  const meter = server.listen()
+  t.after(() => meter.close())
+  await waitFor(() => meter.status === 200, { label: '/live.mp3 bağlansın' })
+
+  // 1. Music is on the air to begin with.
+  assert.ok((await meter.sample(3000)) > 20000, 'hazırlık: önce müzik akmalı')
+
+  // 2. The prayer window opens and the café goes quiet. The stream itself must not end —
+  //    the server keeps sending silence on the same connection, which is what lets a phone
+  //    resume on its own afterwards instead of needing to reconnect.
+  await waitFor(async () => (await server.state()).ezan.active === true,
+    { timeoutMs: 60000, intervalMs: 500, label: 'ezan başlasın' })
+  const duringBytes = await meter.sample(4000)
+  assert.ok(duringBytes > 0, 'yayın kesilmemeli — sessizlik gönderilmeli, bağlantı kopmamalı')
+  assert.ok(meter.status === 200, 'bağlantı ayakta kalmalı')
+  // Bytes are NOT sound: the encoder keeps producing MP3 frames of pure silence, so a
+  // byte count says the connection is alive and nothing at all about what the café hears.
+  // Measuring the level is the only way this test can tell a paused station from a broken
+  // one — checked by mutation, and the byte-count version did not notice.
+  const quiet = await measureBroadcast(server.port, 4)
+  assert.ok(quiet.rms < 0.02, `ezan sırasında sessiz olmalı, seviye: ${quiet.rms.toFixed(4)}`)
+
+  // 3. The window closes and the music comes back — in the audio, not in a flag.
+  await waitFor(async () => (await server.state()).ezan.active === false,
+    { timeoutMs: 120000, intervalMs: 1000, label: 'ezan bitsin' })
+  const loud = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > 0.05 ? measured : null
+  }, { timeoutMs: 60000, intervalMs: 0, label: 'müzik geri gelsin' })
+
+  assert.ok(loud.rms > 0.05, `ezandan sonra müzik DUYULMALI, seviye: ${loud.rms.toFixed(4)}`)
+  assert.equal((await server.state()).playback.status, 'playing')
 })
