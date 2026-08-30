@@ -188,3 +188,35 @@ test('etiket doldurma fırtınası sırasında ses kesilmez', { timeout: 300000 
   const done = (await server.state()).music.filter(track => track.tagsRead).length
   assert.ok(done > 0, 'ölçüm sırasında etiket doldurma çalışmış olmalı')
 })
+
+test('reklamlar operatörün verdiği adı korur', { timeout: 120000 }, async t => {
+  // Music tags are usually better than filenames — someone else made the file and named the
+  // song properly. Ads are the opposite: the operator produced or commissioned it and typed
+  // the name themselves in this app's own folder, while whatever tool exported it may have
+  // left "Track 1" inside. There is no rename in this app, so letting a tag win here would
+  // replace a deliberate name with junk and leave the operator no way back.
+  const source = taggedTone({ title: 'Track 1', artist: 'Audacity' })
+  const server = await startServer({ music: [], ads: [] })
+  t.after(() => server.stop())
+
+  fs.copyFileSync(source, path.join(server.dataDir, 'Ads', 'Kahve İndirimi.mp3'))
+  await server.api('/api/rescan', 'POST')
+
+  const ad = await waitFor(async () => findByFile((await server.state()).ads, 'Kahve İndirimi.mp3'),
+    { timeoutMs: 20000, label: 'reklam taransın' })
+  assert.equal(ad.title, 'Kahve İndirimi', 'reklamın adı dosya adı olmalı')
+})
+
+test('müzik etiketi yine de kazanır', async t => {
+  // The other side of the same rule, so the distinction is deliberate rather than accidental.
+  const source = taggedTone({ title: 'Gerçek Şarkı Adı', artist: 'Sanatçı' })
+  const server = await startServer({ music: [], ads: [] })
+  t.after(() => server.stop())
+
+  fs.copyFileSync(source, path.join(server.dataDir, 'Music', '01 - parca.mp3'))
+  await server.api('/api/rescan', 'POST')
+
+  const track = await waitFor(async () => findByFile((await server.state()).music, '01 - parca.mp3'),
+    { timeoutMs: 20000, label: 'parça taransın' })
+  assert.equal(track.title, 'Gerçek Şarkı Adı')
+})

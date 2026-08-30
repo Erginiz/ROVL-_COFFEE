@@ -1134,7 +1134,11 @@ app.post('/api/media/:kind', requireAdmin, (req, res, next) => {
   const probed = await probeFile(req.file.path)
   // The file's own tags win over its name: an operator uploading '01 - Track 01.mp3' means
   // the song inside it, and that is what the customer sees on the listener page.
-  const title = probed.title || path.parse(req.file.originalname).name
+  // Music tags beat filenames — someone else made the file and named the song properly.
+  // Ads are the opposite: the operator produced this one and typed its name in this app's own
+  // folder, while the tool that exported it may have left 'Track 1' inside. There is no rename
+  // here, so a tag winning would replace a deliberate name with junk and leave no way back.
+  const title = (kind === 'ad' ? null : probed.title) || path.parse(req.file.originalname).name
   const item = { id: crypto.randomUUID(), title, artist: probed.artist || 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: probed.durationSeconds, gainDb: await probeLoudness(req.file.path) ?? 0, addedAt: new Date().toISOString() }
   // The file is on disk before the two ffmpeg probes above run, so a folder scan during
   // that second or two sees it, finds no library entry, and adds one of its own — then this
@@ -1233,7 +1237,8 @@ async function runScan() {
       for (const filename of files) {
         if (state[key].some(item => item.filename === filename)) continue
         const probed = await probeFile(path.join(dir, filename))
-        const item = { id: crypto.randomUUID(), title: probed.title || path.parse(filename).name, artist: probed.artist || 'Bilinmeyen sanatçı', filename, durationSeconds: probed.durationSeconds, addedAt: new Date().toISOString() }
+        const useTags = key !== 'ads'          // reklamlar operatörün verdiği adı korur
+        const item = { id: crypto.randomUUID(), title: (useTags && probed.title) || path.parse(filename).name, artist: (useTags && probed.artist) || 'Bilinmeyen sanatçı', filename, durationSeconds: probed.durationSeconds, addedAt: new Date().toISOString() }
         // Re-check after the await. Probing yields for a second or so, and an upload of this
         // very file can land its own entry in that gap — the check above was made against a
         // library that no longer exists. Skipping here is what keeps the track from being
@@ -1285,8 +1290,10 @@ async function runScan() {
         item.tagsRead = true
         // Only overwrite with something real. A file whose tags cannot be read keeps the
         // name it has, which is its filename — the same place it came from.
-        if (probed.title) item.title = probed.title
-        if (probed.artist) item.artist = probed.artist
+        if (key !== 'ads') {
+          if (probed.title) item.title = probed.title
+          if (probed.artist) item.artist = probed.artist
+        }
         changed = true
       }
       // Loudness analysis decodes the whole file, so it is deliberately rationed: a few
