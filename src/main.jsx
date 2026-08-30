@@ -544,6 +544,13 @@ function ConnectCard({ station }) {
     {multi && <label className="ip-select">Ağ adresi<select value={net.ip} onChange={e => chooseIp(e.target.value)}>{net.ips.map(x => <option key={x.ip} value={x.ip}>{x.ip} — {x.name}</option>)}</select></label>}
     {ipError && <p className="warn">{ipError}</p>}
     {multi && <p className="muted">Telefonlar bağlanamıyorsa buradan doğru Wi‑Fi ağ adresini seçin.</p>}
+    {/* The station listens on EVERY address the PC has, so each of these is live — the QR
+        can only show one at a time. When a café has two networks, the fastest way to find
+        the one the phones are on is to type them into a phone until one opens. */}
+    {multi && <div className="all-urls">
+      <span className="mtl-label">Telefonda deneyebileceğiniz adresler</span>
+      {net.ips.map(x => <code key={x.ip}>http://{x.ip}:8090/listen<small> — {x.name}</small></code>)}
+    </div>}
     {multi && (reached.length
       ? <p className="ok reached-note">Telefonlar şu adres(ler) üzerinden bağlandı: {reached.map(r => r.ip).join(', ')}{reached.some(r => r.ip === net.ip) ? '' : ' — QR başka bir adresi gösteriyor, yukarıdan bunu seçin.'}</p>
       : <p className="muted reached-note">Henüz hiçbir telefon bağlanamadı. Telefonun, bu bilgisayarla <b>aynı Wi‑Fi ağında</b> olduğundan emin olun.</p>)}

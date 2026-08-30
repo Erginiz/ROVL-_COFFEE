@@ -147,6 +147,16 @@ function getLanIp() {
   const preferred = state?.station?.preferredIp
   if (preferred && all.some(x => x.ip === preferred)) return preferred // operator's explicit choice
   if (!all.length) return '127.0.0.1'
+  // Evidence beats guesswork. With two routers in the café both addresses are 192.168.x, so
+  // the score falls through to the adapter NAME — and Wi-Fi (+25) outranks Ethernet (+18).
+  // A PC wired to the router the phones are on therefore advertised the OTHER network, and
+  // the QR opened nothing. If a phone has actually reached us on an address recently, that
+  // address demonstrably works from where the customers are: prefer it over the heuristic.
+  const proven = reachedViaList().map(r => r.ip).filter(ip => all.some(x => x.ip === ip))
+  if (proven.length) {
+    return proven.slice().sort((a, b) =>
+      scoreIp(all.find(x => x.ip === b)) - scoreIp(all.find(x => x.ip === a)))[0]
+  }
   return all.slice().sort((a, b) => scoreIp(b) - scoreIp(a))[0].ip
 }
 // ── Which address are phones actually reaching us on? ────────────────────────
@@ -465,6 +475,18 @@ function sameSiteWrites(req, res, next) {
   if (!origin) return next()
   let host
   try { host = new URL(origin).hostname } catch { return res.status(403).json({ error: 'Geçersiz istek kaynağı' }) }
+  // The real same-site test: did this page come from the SAME host the request is addressed
+  // to? Matching only against our IPv4 list rejected every write from a phone that reached
+  // the PC by name — `http://KAFE-PC:8090`, which Windows makes work on any LAN. The page
+  // loaded and the audio played (those are GETs), but the listener count, the phone login
+  // and the announcement all failed silently, which looks exactly like "the phone cannot
+  // find us". Comparing against req.hostname covers every address form — IP, machine name,
+  // mDNS, a domain later — and still refuses a genuinely foreign site.
+  // Case-insensitive on purpose: `new URL()` lower-cases the hostname it parses, while the
+  // Host header arrives exactly as the phone typed it — and Windows machine names are
+  // normally capitalised (KAFE-PC). Comparing them raw failed for precisely the case this
+  // check exists to allow.
+  if (host === String(req.hostname || '').toLowerCase()) return next()
   if (host === '127.0.0.1' || host === 'localhost' || host === '::1' || lanIpSet().has(host)) return next()
   res.status(403).json({ error: 'Bu istek başka bir siteden geldi ve reddedildi' })
 }
@@ -1243,11 +1265,27 @@ ezanTick().catch(() => {})
 
 // Mint this install's own HTTPS certificate on first run. Generating it here (rather than
 // shipping one in the installer) means the private key exists only on this machine.
+// A certificate only covers the addresses it was minted for. Swap the café's router and the
+// PC lands on a new subnet — the old certificate now names an address the machine no longer
+// has, so the phone gets a NAME MISMATCH on top of the self-signed warning. Some mobile
+// browsers refuse to let anyone past that at all, and the announcement page (which needs
+// HTTPS for the microphone) simply stops opening. Detect it and mint a new one.
+function certCoversCurrentIps(certPem) {
+  try {
+    const { X509Certificate } = require('crypto')
+    const san = new X509Certificate(certPem).subjectAltName || ''
+    const ips = listLanIps().map(x => x.ip)
+    if (!ips.length) return true   // nothing to cover yet; don't churn the certificate
+    return ips.every(ip => san.includes(ip))
+  } catch { return true }   // unreadable: leave it alone rather than regenerating in a loop
+}
 async function ensureCerts() {
   const keyPath = path.join(certDir, 'key.pem')
   const certPath = path.join(certDir, 'cert.pem')
   if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
-    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }
+    const cert = fs.readFileSync(certPath)
+    if (certCoversCurrentIps(cert)) return { key: fs.readFileSync(keyPath), cert }
+    console.log('Ağ adresi değişmiş — HTTPS sertifikası yeni adrese göre yenileniyor.')
   }
   const altNames = [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }]
   for (const { ip } of listLanIps()) altNames.push({ type: 7, ip })
@@ -1302,6 +1340,11 @@ function startServer({ updater } = {}) {
   }
   process.once('SIGTERM', shutdown)
   process.once('SIGINT', shutdown)
+  // Exposed so the desktop app can close the station DELIBERATELY. Windows does not deliver
+  // SIGTERM/SIGINT to an Electron app being quit, so those handlers never ran in production
+  // and the only cleanup was the process-exit hook — which kills ffmpeg but cannot end the
+  // listeners' connections or stop the timers first. Electron calls this instead.
+  httpServer.gracefulShutdown = shutdown
   return httpServer
 }
 

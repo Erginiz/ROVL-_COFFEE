@@ -134,5 +134,22 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit()
   })
 
-  app.on('before-quit', () => { try { server?.close() } catch {} })
+  // Closing the app must actually close the STATION: flush the state to disk, stop the
+  // timers, end every listener's connection and kill ffmpeg. `server.close()` alone did
+  // none of that — it only stops accepting new connections, and the long-lived audio and
+  // event streams never end on their own, so it could not even finish. Everything else was
+  // left to the process-exit hook, which is a backstop, not a plan.
+  let quitting = false
+  app.on('before-quit', event => {
+    if (quitting || !server?.gracefulShutdown) { try { server?.close() } catch {} ; return }
+    // Hold the quit open just long enough to shut down cleanly, then quit for real. The
+    // timeout is the safety net: a station that refuses to close is worse than an untidy one.
+    event.preventDefault()
+    quitting = true
+    let done = false
+    const finish = () => { if (!done) { done = true; app.quit() } }
+    setTimeout(finish, 5000).unref?.()
+    try { server.gracefulShutdown() } catch {}
+    setImmediate(finish)
+  })
 }

@@ -99,7 +99,7 @@ let nextPort = 8300 + Math.floor(Math.random() * 200)
 // `updaterScenario` boots the server through a harness entry point that injects a FAKE
 // updater (see fake-updater-server.cjs), so the in-app update flow can be tested without
 // Electron, GitHub, or actually restarting anything.
-async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, dataDir: existingDir = null, env = {}, updaterScenario = null } = {}) {
+async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, dataDir: existingDir = null, env = {}, updaterScenario = null, control = false } = {}) {
   const port = nextPort++
   const dataDir = existingDir || fs.mkdtempSync(path.join(os.tmpdir(), 'rovli-test-'))
   fs.mkdirSync(path.join(dataDir, 'Music'), { recursive: true })
@@ -108,12 +108,16 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
   ads.forEach((src, i) => fs.copyFileSync(src, path.join(dataDir, 'Ads', `ad-${i}.mp3`)))
   for (let i = 0; i < corruptMusic; i++) writeCorrupt(path.join(dataDir, 'Music', `broken-${i}.mp3`))
 
-  const controlPort = updaterScenario ? port + 2000 : null
-  const entry = updaterScenario ? path.join(__dirname, 'fake-updater-server.cjs') : SERVER
+  // The harness entry point is only used when a test needs a side channel (a fake updater,
+  // or triggering graceful shutdown the way the desktop app does). Everything else runs the
+  // product's own entry point, unmodified.
+  const needsControl = !!updaterScenario || control
+  const controlPort = needsControl ? port + 2000 : null
+  const entry = needsControl ? path.join(__dirname, 'harness-server.cjs') : SERVER
   const proc = spawn(process.execPath, [entry], {
     env: {
       ...process.env, CAFE_RADIO_DATA: dataDir, PORT: String(port), HTTPS_PORT: String(port + 1000),
-      ...(updaterScenario ? { SCENARIO: updaterScenario, CONTROL_PORT: String(controlPort) } : {}),
+      ...(needsControl ? { SCENARIO: updaterScenario || 'none', CONTROL_PORT: String(controlPort) } : {}),
       ...env
     },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
@@ -177,7 +181,7 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
 
   // Talks to the fake updater's control port: what the station asked it to do, and pushing
   // the pretend download forward.
-  const control = pathname => new Promise((resolve, reject) => {
+  const controlRequest = pathname => new Promise((resolve, reject) => {
     if (!controlPort) return reject(new Error('updaterScenario ile başlatılmadı'))
     const req = http.get({ host: '127.0.0.1', port: controlPort, path: pathname }, res => {
       let d = ''
@@ -189,7 +193,7 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
   })
 
   const handle = {
-    port, dataDir, proc, api, raw, upload, listen, control,
+    port, dataDir, proc, api, raw, upload, listen, control: controlRequest,
     pid: proc.pid,
     lanIp: lanIp(),
     get output() { return output },
