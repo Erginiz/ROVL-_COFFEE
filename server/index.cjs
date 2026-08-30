@@ -266,6 +266,25 @@ function currentPositionSeconds() {
   if (state.playback.status !== 'playing' || !state.playback.currentStartedAt) return Number(state.playback.currentOffsetSeconds || 0)
   return Math.max(0, Math.floor((Date.now() - new Date(state.playback.currentStartedAt).getTime()) / 1000))
 }
+// The "Yayın Durumu" card. This used to be two hardcoded literals — `streamingConfigured:
+// true` and a sentence saying the engine was active — shown in green regardless of whether
+// a single byte was reaching anyone. It read "aktif" throughout the pump deadlock that left
+// the café silent for as long as it took someone to notice by ear.
+//
+// `audioEngine` is constructed further down this file; every caller of publicState() runs
+// after module initialisation, but the optional call keeps a status card from being the
+// thing that crashes a broadcast.
+function describeBroadcast() {
+  const health = audioEngine?.health?.()
+  if (!health) return { streamingConfigured: false, flowing: false, message: 'Ses motoru başlatılmadı.' }
+  if (health.flowing) return { streamingConfigured: true, flowing: true, message: 'Yerel MP3 yayın motoru aktif.' }
+  if (!health.encoderRunning) {
+    return { streamingConfigured: true, flowing: false, message: 'Ses kodlayıcı çalışmıyor — yayın kesik.' }
+  }
+  const seconds = Math.round(health.sinceOutputMs / 1000)
+  return { streamingConfigured: true, flowing: false, message: `Yayın ${seconds} sn'dir akmıyor — motor kendini yeniliyor.` }
+}
+
 function publicState() {
   cleanListeners()
   const current = state.playback.currentId
@@ -301,7 +320,7 @@ function publicState() {
         streamUrl: `http://${ip}:${port}/live.mp3`
       }
     })(),
-    capabilities: { streamingConfigured: true, message: 'Yerel MP3 yayın motoru aktif.' }
+    capabilities: describeBroadcast()
   }
 }
 // Fanning the state out is the expensive half of a state change: every open panel and phone

@@ -211,6 +211,17 @@ class AudioEngine {
   // "healthy" to it while listeners hear nothing. The encoder is fed silence even when idle,
   // so a gap in its output is unambiguous: recycle it. Its close handler releases the pump
   // guard and schedules the respawn, so this single action revives the broadcast.
+  // The same timestamp the watchdog above judges by, offered to anyone who needs to say
+  // whether the station is actually broadcasting. The panel's status card used to assert
+  // this from a hardcoded literal and stayed green through total silence.
+  //
+  // Called on every state broadcast, so it does no work beyond reading two fields.
+  health() {
+    const sinceOutputMs = Date.now() - this.lastEncoderOutputAt
+    const encoderRunning = Boolean(this.encoder) && !this.shuttingDown
+    return { encoderRunning, sinceOutputMs, flowing: encoderRunning && sinceOutputMs < OUTPUT_STALL_MS }
+  }
+
   checkOutput() {
     if (this.shuttingDown || !this.encoder || this.encoderRestartTimer) return
     if (Date.now() - this.lastEncoderOutputAt < OUTPUT_STALL_MS) return

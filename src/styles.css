@@ -112,6 +112,9 @@ header{height:78px;border-bottom:1px solid var(--brand-maroon-dark);display:flex
 .notices{margin-top:14px}
 .warn{color:#8A5A00;font-size:12px;line-height:1.45}
 .ok{color:var(--success)}
+/* Yayın gerçekten kesildiğinde kullanılır. Renk tek başına anlam taşımasın diye kalın: bu
+   satır sessiz bir kafede tek uyarı olabilir ve kırmızıyı ayırt edemeyen biri de görmeli. */
+.bad{color:var(--error);font-weight:600}
 .listener{min-height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:28px;background:radial-gradient(circle at 50% 0%,rgba(102,30,31,.10),transparent 45%),var(--background-main)}
 .listener-logo{width:62px;height:62px;border-radius:var(--radius-lg);font-size:22px;margin-bottom:22px;box-shadow:var(--shadow-md)}
 .listener .now-playing{width:min(100%,430px);margin:18px 0}
