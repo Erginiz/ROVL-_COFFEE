@@ -1341,12 +1341,26 @@ function startServer({ updater } = {}) {
   // believing it is fine, while phones reach whichever socket the OS picked. Measured: a
   // second instance bound 0.0.0.0:8090 without complaint. Refusing the bind turns that into
   // an error we can report instead of a mystery in the café.
-  const httpServer = app.listen({ port, host: '0.0.0.0', exclusive: true },
+  // Listen on '::' rather than '0.0.0.0': that serves IPv6 AND IPv4 clients on the same
+  // socket. It matters because a phone reaching the PC by NAME gets IPv6 first — measured on
+  // this machine, the hostname resolves to fe80::… before 192.168.1.14 — and an IPv4-only
+  // socket refuses that connection. Browsers do fall back, but a refused first attempt is a
+  // delay at best and a failure on clients that do not retry.
+  let listenFellBack = false
+  const httpServer = app.listen({ port, host: '::', exclusive: true },
     () => console.log(`Rovli Radyo API http://127.0.0.1:${port}`))
   // Without this handler a failed bind is an unhandled 'error' event. The desktop app catches
   // it only to open its window anyway, so the panel appeared over a station that was not
   // listening at all — and nothing on screen said why.
   httpServer.on('error', error => {
+    // A machine with IPv6 switched off cannot bind '::' at all. Fall back to IPv4 rather than
+    // refusing to start — the station must come up on whatever the PC actually supports.
+    if (!listenFellBack && ['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EINVAL', 'EPROTONOSUPPORT'].includes(error?.code)) {
+      listenFellBack = true
+      console.log('IPv6 kullanılamıyor, IPv4 üzerinden dinleniyor.')
+      httpServer.listen({ port, host: '0.0.0.0', exclusive: true })
+      return
+    }
     const message = error?.code === 'EADDRINUSE'
       ? `Port ${port} zaten kullanımda. Rovli Radyo'nun başka bir kopyası açık olabilir — Görev Yöneticisi'nden kapatıp tekrar deneyin.`
       : `Sunucu başlatılamadı: ${error?.message}`
@@ -1361,8 +1375,18 @@ function startServer({ updater } = {}) {
   ensureCerts().then(creds => {
     if (shuttingDown) return
     httpsServer = https.createServer(creds, app)
-    httpsServer.on('error', error => console.error('HTTPS sunucu hatası:', error.message))
-    httpsServer.listen({ port: httpsPort, host: '0.0.0.0', exclusive: true },
+    // Same dual-stack reasoning as the HTTP listener above — the announcement page is reached
+    // by exactly the same addresses.
+    let httpsFellBack = false
+    httpsServer.on('error', error => {
+      if (!httpsFellBack && ['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EINVAL', 'EPROTONOSUPPORT'].includes(error?.code)) {
+        httpsFellBack = true
+        httpsServer.listen({ port: httpsPort, host: '0.0.0.0', exclusive: true })
+        return
+      }
+      console.error('HTTPS sunucu hatası:', error.message)
+    })
+    httpsServer.listen({ port: httpsPort, host: '::', exclusive: true },
       () => console.log(`Rovli Radyo HTTPS https://127.0.0.1:${httpsPort}`))
   }).catch(error => console.error('HTTPS başlatılamadı:', error.message))
   const shutdown = () => {
