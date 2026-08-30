@@ -148,3 +148,53 @@ describe('Bağlantı adresleri', () => {
     expect(shown).not.toContain('8090')
   })
 })
+
+// The café's problem, if the diagnosis is right, is Windows blocking the station on a network
+// it has newly filed as Public. That explanation has to appear where the operator is already
+// looking when phones will not connect — and above the address list, because trying those
+// addresses one by one is wasted effort until it is fixed.
+describe('Güvenlik duvarı uyarısı', () => {
+  const withFirewall = firewall => ({
+    network: {
+      ip: '192.168.1.14', port: 8090, firewall,
+      ips: [{ ip: '192.168.1.14', name: 'Wi-Fi' }, { ip: '10.0.0.5', name: 'Ethernet' }],
+      reachedVia: [], preferred: null, preferredMissing: false,
+      webUrl: 'http://192.168.1.14:8090/listen'
+    }
+  })
+
+  test('engelli ağ uyarısı gösterilir ve ne yapılacağını söyler', () => {
+    const { container } = render(<ConnectCard station={withFirewall({
+      problem: true, networks: [], blocked: [{ name: 'Kafe Wi-Fi', category: 'Public' }],
+      message: '"Kafe Wi-Fi" ağı "Genel" olarak işaretli ve bu ağı kapsayan bir güvenlik duvarı izni yok — telefonlar bağlanamaz. Windows ağ ayarlarından bu ağı "Özel" yapın.'
+    })} />)
+    const warning = container.querySelector('.bad')
+    expect(warning).not.toBeNull()
+    expect(warning.textContent).toContain('Özel')
+  })
+
+  test('uyarı adres listesinin ÜSTÜNDE durur', () => {
+    // Below the addresses it reads as a footnote to a list the operator is about to waste
+    // time on; above it, it is the reason that list will not work.
+    const { container } = render(<ConnectCard station={withFirewall({
+      problem: true, networks: [], blocked: [{ name: 'Kafe', category: 'Public' }], message: 'Ağ engelli'
+    })} />)
+    const nodes = [...container.querySelectorAll('.bad, .all-urls')]
+    expect(nodes.length).toBe(2)
+    expect(nodes[0].className).toContain('bad')
+  })
+
+  test('sorun yokken hiçbir şey gösterilmez', () => {
+    const { container } = render(<ConnectCard station={withFirewall({
+      problem: false, networks: [{ name: 'Ofis', category: 'Private', covered: true }], blocked: [], message: null
+    })} />)
+    expect(container.querySelector('.bad')).toBeNull()
+  })
+
+  test('kontrol henüz yapılmadıysa da bozulmaz', () => {
+    // null means "not known yet", and the check takes seconds. It must never read as a fault.
+    const { container } = render(<ConnectCard station={withFirewall(null)} />)
+    expect(container.querySelector('.bad')).toBeNull()
+    expect(container.querySelectorAll('code').length).toBeGreaterThan(0)
+  })
+})

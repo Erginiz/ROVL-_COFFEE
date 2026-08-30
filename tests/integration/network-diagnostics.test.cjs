@@ -115,3 +115,40 @@ test('kayıtlı adres kaybolduğunda uyarı verilir ve yayın durmaz', { timeout
   assert.notEqual(state.network.ip, '10.77.77.77', 'yayın var olan bir adrese düşmeli')
   assert.ok(state.network.webUrl.includes(state.network.ip), 'bağlantı adresi geçerli olmalı')
 })
+
+// The café's unsolved problem: phones stopped connecting after a new router, the address on
+// screen was right, the page never loaded. A Windows firewall rule scoped to a profile the PC
+// is no longer on produces exactly that, and nothing in the app could see it — diagnosing it
+// needed someone on site to run a script.
+//
+// The verdict logic is pinned down in tests/unit/firewall-check.test.cjs, where every branch
+// is reachable. What can be checked against a running station is that the check happens, that
+// its answer reaches the panel, and — most important — that a machine which cannot answer is
+// left alone rather than warned about.
+test('güvenlik duvarı durumu panele ulaşır', { timeout: 120000 }, async t => {
+  const server = await startServer({ music: [] })
+  t.after(() => server.stop())
+
+  const firewall = await waitFor(async () => (await server.state()).network.firewall,
+    { timeoutMs: 60000, label: 'güvenlik duvarı kontrolü' })
+
+  assert.equal(typeof firewall.problem, 'boolean')
+  assert.ok(Array.isArray(firewall.networks), 'ağ listesi olmalı')
+  if (firewall.problem) {
+    assert.ok(firewall.message, 'sorun varsa ne yapılacağı yazılmalı')
+  } else {
+    assert.equal(firewall.message, null, 'sorun yokken mesaj olmamalı')
+  }
+})
+
+test('kontrol tamamlanmadan panel bozulmaz', async t => {
+  // It takes seconds. Everything the operator looks at has to work before it lands, and
+  // `null` has to mean "not known yet" rather than "no problem" or a crash.
+  const server = await startServer({ music: [] })
+  t.after(() => server.stop())
+
+  const network = (await server.state()).network
+  assert.ok(network.ip, 'adres hemen gelmeli')
+  assert.ok(Array.isArray(network.ips))
+  assert.ok(network.firewall === null || typeof network.firewall === 'object')
+})

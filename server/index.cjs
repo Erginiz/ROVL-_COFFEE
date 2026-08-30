@@ -13,6 +13,7 @@ const ffmpegPath = process.resourcesPath && ffmpegBinary.includes('app.asar') ? 
 const { AudioEngine } = require('./audio-engine.cjs')
 const { findActiveWindow } = require('./ezan-window.cjs')
 const { createLoginBrake } = require('./login-brake.cjs')
+const { readWindowsNetworkPosture } = require('./firewall-check.cjs')
 
 const app = express()
 const port = Number(process.env.PORT || 8090)
@@ -340,6 +341,9 @@ function publicState() {
         // phones "cannot connect" and nothing on screen says why.
         preferredMissing: !!preferred && !ips.some(x => x.ip === preferred),
         reachedVia: reachedViaList(),
+        // null until the check has run (or on a machine that cannot answer) — the panel
+        // shows nothing rather than a guess.
+        firewall: firewallPosture,
         webUrl: `http://${ip}:${port}/listen`,
         adminUrl: `https://${ip}:${httpsPort}/listen`,
         streamUrl: `http://${ip}:${port}/live.mp3`
@@ -1439,6 +1443,33 @@ function sweepAuth() {
     if (record.lockedUntil < now && now - record.first > LOGIN_WINDOW) loginFailures.delete(ip)
   }
 }
+// A café whose phones stopped connecting after a new router, where the address on screen was
+// right and the page simply never loaded. The most likely cause is a Windows firewall rule
+// scoped to a network profile the PC is no longer on — which nothing in the app could see,
+// so diagnosing it needed someone on site to run a script.
+//
+// Asking Windows costs ~2.5 s of PowerShell startup, so it runs shortly after boot and every
+// half hour after that, never on a path anything waits for.
+let firewallPosture = null
+let firewallProblemReported = false
+async function checkFirewall() {
+  const posture = await readWindowsNetworkPosture()
+  if (!posture) return                       // no answer is not evidence — say nothing
+  firewallPosture = posture
+  if (posture.problem && !firewallProblemReported) {
+    firewallProblemReported = true
+    log('system', posture.message)
+    broadcast()
+  } else if (!posture.problem && firewallProblemReported) {
+    firewallProblemReported = false
+    log('system', 'Ağ izinleri düzeldi — telefonlar yeniden bağlanabilir')
+    broadcast()
+  }
+}
+const firstFirewallCheck = setTimeout(() => checkFirewall().catch(() => {}), 5000)
+firstFirewallCheck.unref?.()
+const firewallTimer = setInterval(() => checkFirewall().catch(() => {}), 30 * 60000)
+firewallTimer.unref?.()
 const tickTimer = setInterval(() => { cleanListeners(); sweepAuth(); maybeSendScheduledReport(); broadcast(); scanLibrary().catch(() => {}) }, 15000)
 tickTimer.unref()
 resetTimedAd()
@@ -1697,6 +1728,10 @@ function startServer({ updater } = {}) {
   const shutdown = () => {
     shuttingDown = true
     clearInterval(tickTimer)      // stop ticks before closing so no write hits a dead socket
+    // The firewall check is slow and asynchronous; a result landing after shutdown would
+    // try to broadcast into sockets that are about to end.
+    clearTimeout(firstFirewallCheck)
+    clearInterval(firewallTimer)
     // A coalesced broadcast still pending would fire into sockets we are about to end.
     if (broadcastTimer) { clearTimeout(broadcastTimer); broadcastTimer = null; broadcastPending = false }
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }

@@ -626,6 +626,10 @@ function ConnectCard({ station }) {
     {/* The station listens on EVERY address the PC has, so each of these is live — the QR
         can only show one at a time. When a café has two networks, the fastest way to find
         the one the phones are on is to type them into a phone until one opens. */}
+    {/* The one explanation the panel could never give: Windows blocking the station on this
+        network. It goes above the address list because it makes every address below it
+        useless — trying them one by one is wasted effort until this is fixed. */}
+    {net.firewall?.problem && <p role="status" className="bad">{net.firewall.message}</p>}
     {multi && <div className="all-urls">
       <span className="mtl-label">Telefonda deneyebileceğiniz adresler</span>
       {net.ips.map(x => <code key={x.ip}>http://{x.ip}:{net.port || 8090}/listen<small> — {x.name}</small></code>)}
