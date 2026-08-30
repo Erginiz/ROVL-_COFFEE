@@ -157,7 +157,20 @@ function useStation() {
     const connect = () => {
       api('/api/state').then(setStation).catch(() => {})
       events = new EventSource('/api/events')
-      events.onmessage = event => { try { setStation(JSON.parse(event.data)) } catch {} }
+      // The server leaves the music and ad lists out of a frame while they have not changed —
+      // they are most of the payload and it goes out hundreds of times an hour over the café
+      // Wi-Fi. Keep whatever the last frame that carried them gave us, so an omission means
+      // "unchanged" rather than "now empty".
+      events.onmessage = event => {
+        try {
+          const incoming = JSON.parse(event.data)
+          setStation(previous => previous ? {
+            ...previous, ...incoming,
+            music: incoming.music ?? previous.music,
+            ads: incoming.ads ?? previous.ads
+          } : incoming)
+        } catch {}
+      }
       // Surface the failure and reconnect instead of silently freezing on stale data.
       events.onerror = () => {
         console.error('Canlı bağlantı koptu, yeniden bağlanılıyor…')
