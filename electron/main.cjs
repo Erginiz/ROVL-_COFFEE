@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, dialog } = require('electron')
 const path = require('path')
+const { classifyUpdateError } = require('../server/update-error.cjs')
 
 // ── Uygulama içi güncelleme ──────────────────────────────────────────────────
 // The café PC is somewhere else, so a fix that needs someone to walk over with a 109 MB
@@ -21,6 +22,9 @@ const updateState = {
   downloaded: false,
   newVersion: null,
   error: null,
+  // Set when the check failed only because nothing has been released yet. Kept apart from
+  //  so the panel stays calm while the fact remains visible to anyone looking.
+  noReleaseYet: false,
   checkedAt: null
 }
 let autoUpdater = null
@@ -65,9 +69,10 @@ function setupUpdater() {
     // crashing the station over.
     updateState.checking = false
     updateState.downloading = false
-    updateState.error = String(error?.message || error).slice(0, 200)
+    Object.assign(updateState, classifyUpdateError(error))
+    updateState.checkedAt = new Date().toISOString()
   })
-  const check = () => { try { autoUpdater.checkForUpdates() } catch (error) { updateState.error = String(error?.message || error).slice(0, 200) } }
+  const check = () => { try { autoUpdater.checkForUpdates() } catch (error) { Object.assign(updateState, classifyUpdateError(error)) } }
   setTimeout(check, 20000)                     // let the station finish booting first
   setInterval(check, 6 * 3600 * 1000).unref?.()
 }
