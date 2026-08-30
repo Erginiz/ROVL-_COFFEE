@@ -77,4 +77,17 @@ test('kütüphanenin tamamı bozuksa sunucu ayakta kalır ve sonsuz döngüye gi
   // And the failure has to be visible to the operator, not swallowed.
   const sawFailure = (state.history || []).some(h => h.type === 'system')
   assert.ok(sawFailure, 'geçmişte bir sistem kaydı olmalı (operatör sebebi görebilmeli)')
+
+  // The give-up itself, which is the safety property: after trying every file it must STOP
+  // rather than keep cycling. Without that guard a folder of broken files spawns an ffmpeg
+  // per attempt for the life of the station, and the "server is still up" assertions above
+  // would all still pass while the PC slowly buries itself.
+  assert.equal(state.playback.status, 'stopped', 'hepsi bozukken çalıyor görünmemeli')
+  assert.ok((state.history || []).some(h => /bulunamadı|durduruldu/i.test(h.title || '')),
+    `vazgeçtiği günlüğe yazılmalı: ${JSON.stringify((state.history || []).slice(0, 3))}`)
+
+  // Nothing left running: the count is the evidence that it stopped trying, not just that
+  // it stopped saying so.
+  const encoders = server.children().length
+  assert.ok(encoders <= 2, `sadece kalıcı kodlayıcı kalmalı, açık ffmpeg: ${encoders}`)
 })
