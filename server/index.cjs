@@ -121,7 +121,17 @@ function saveNow() { try { fs.writeFileSync(statePath, JSON.stringify(state, nul
 // Coalesce frequent saves (heartbeats, controls, ticks) into at most one disk
 // write per second so a busy station never thrashes the event loop with I/O.
 function save() { if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; saveNow() }, 1000); saveTimer.unref?.() }
+// Enumerating the machine's adapters is far from free: measured at ~6 ms per call on a PC
+// with the usual pile of virtual adapters. publicState() needs the list three times, and it
+// is built on every broadcast — which runs on the SAME event loop that feeds the encoder its
+// 20 ms audio chunks. Tens of milliseconds of blocking syscalls there is heard as a stutter.
+//
+// Addresses change when a cable is plugged or Wi-Fi reconnects, which is rare and never
+// urgent: a few seconds of staleness costs nothing, and the panel refreshes on its own tick.
+const LAN_IP_CACHE_MS = 5000
+let lanIpsCache = { at: 0, list: [] }
 function listLanIps() {
+  if (Date.now() - lanIpsCache.at < LAN_IP_CACHE_MS) return lanIpsCache.list
   const out = []
   for (const [name, addresses] of Object.entries(os.networkInterfaces())) {
     for (const item of addresses || []) {
@@ -130,7 +140,14 @@ function listLanIps() {
       out.push({ name, ip: item.address })
     }
   }
+  lanIpsCache = { at: Date.now(), list: out }
   return out
+}
+// Forces the next read to re-enumerate. Used where a stale answer would be actively wrong —
+// refusing an address the operator just plugged in, or minting a certificate that misses it.
+function refreshLanIps() {
+  lanIpsCache = { at: 0, list: [] }
+  return listLanIps()
 }
 // Score interfaces so we pick the real Wi-Fi/Ethernet LAN address the phones are
 // on, not a VirtualBox/VMware/WSL/VPN adapter that phones can't reach.
@@ -744,7 +761,10 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
       // and nothing explains why.
       const wanted = station.preferredIp
       if (!wanted) state.station.preferredIp = null
-      else if (listLanIps().some(x => x.ip === wanted)) state.station.preferredIp = wanted
+      // Fresh read: the operator may be selecting an address that appeared seconds ago (they
+      // just plugged the cable in), and refusing it because of a cached list would be exactly
+      // the silent "the selector does nothing" failure this endpoint reports on.
+      else if (refreshLanIps().some(x => x.ip === wanted)) state.station.preferredIp = wanted
       else {
         return res.status(400).json({
           error: `Bu bilgisayarda ${wanted} adresi şu anda yok. Ağ bağlantısı kopmuş olabilir — telefonlarla aynı ağa bağlanıp tekrar deneyin.`
@@ -1312,7 +1332,9 @@ async function ensureCerts() {
     console.log('Ağ adresi değişmiş — HTTPS sertifikası yeni adrese göre yenileniyor.')
   }
   const altNames = [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }]
-  for (const { ip } of listLanIps()) altNames.push({ type: 7, ip })
+  // Fresh read: a certificate is minted once and lived with for years, so it must name the
+  // addresses the machine has right now, not a list cached moments earlier.
+  for (const { ip } of refreshLanIps()) altNames.push({ type: 7, ip })
   const pems = await selfsigned.generate([{ name: 'commonName', value: 'Rovli Radyo' }], {
     keySize: 2048,
     algorithm: 'sha256',
