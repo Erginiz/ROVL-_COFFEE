@@ -110,9 +110,12 @@ if (!app.requestSingleInstanceLock()) {
       autoHideMenuBar: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false }
     })
+    // Not a literal 8090: the station binds whatever PORT says, and the error dialog below
+    // already reads it. Hardcoding it here meant that with PORT set, the panel opened on an
+    // address nothing was serving — a blank window with no explanation.
     const address = process.env.CAFE_RADIO_DEV === '1'
       ? 'http://127.0.0.1:5173/admin'
-      : 'http://127.0.0.1:8090/admin'
+      : `http://127.0.0.1:${process.env.PORT || 8090}/admin`
     window.loadURL(address)
   }
 
