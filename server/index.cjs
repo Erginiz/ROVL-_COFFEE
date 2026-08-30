@@ -11,6 +11,7 @@ const selfsigned = require('selfsigned')
 const ffmpegBinary = require('ffmpeg-static')
 const ffmpegPath = process.resourcesPath && ffmpegBinary.includes('app.asar') ? ffmpegBinary.replace('app.asar', 'app.asar.unpacked') : ffmpegBinary
 const { AudioEngine } = require('./audio-engine.cjs')
+const { findActiveWindow } = require('./ezan-window.cjs')
 
 const app = express()
 const port = Number(process.env.PORT || 8090)
@@ -1257,12 +1258,13 @@ async function ezanTick() {
   const now = new Date()
   const nowMin = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60
   const dur = Math.max(1, Math.min(60, Number(ez.durationMinutes || 8)))
-  let hit = null
-  for (const [prayer, hhmm] of Object.entries(ez.times)) {
-    const m = String(hhmm).match(/(\d+):(\d+)/); if (!m) continue
-    const start = Number(m[1]) * 60 + Number(m[2])
-    if (nowMin >= start && nowMin < start + dur) { hit = { prayer, until: new Date(now.getTime() + (start + dur - nowMin) * 60000).toISOString() }; break }
-  }
+  // The window arithmetic lives in its own module so its edge cases — a window running past
+  // midnight, a malformed time in the fetched schedule — can be tested against an injected
+  // clock instead of whatever time the test happens to run at.
+  const active = findActiveWindow(ez.times, dur, now)
+  const hit = active
+    ? { prayer: active.prayer, until: new Date(now.getTime() + active.minutesLeft * 60000).toISOString() }
+    : null
   // A window the operator cancelled must not be re-armed by the next tick — that was the
   // whole point of the override. `overrideUntil` holds that window's end, so the guard
   // lapses on its own and the following prayer behaves normally.
