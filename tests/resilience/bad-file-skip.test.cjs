@@ -11,6 +11,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { startServer, makeTone, waitFor } = require('../helpers/harness.cjs')
+const { measureBroadcast } = require('../helpers/audio-analysis.cjs')
 
 test('bozuk dosya yayını dondurmaz, sağlam parçaya geçilir', { timeout: 120000 }, async t => {
   // One unreadable file plus one good one. Whichever is picked first, the station must
@@ -42,6 +43,15 @@ test('bozuk dosya yayını dondurmaz, sağlam parçaya geçilir', { timeout: 120
 
   const flowing = await meter.sample(3000)
   assert.ok(flowing > 5000, `bozuk dosyaya rağmen ses akmalı, alınan: ${flowing} bayt`)
+
+  // And it must be MUSIC. Landing on a good track in the state while the decoder never
+  // produces anything is the shape of several bugs in this project's history, and the byte
+  // count above cannot tell the two apart — the encoder emits frames of silence just as fast.
+  const heard = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > 0.05 ? measured : null
+  }, { timeoutMs: 40000, intervalMs: 0, label: 'sağlam parça duyulmalı' })
+  assert.ok(heard.rms > 0.05, `atlanan bozuk dosyadan sonra MÜZİK duyulmalı, seviye: ${heard.rms.toFixed(4)}`)
 })
 
 test('kütüphanenin tamamı bozuksa sunucu ayakta kalır ve sonsuz döngüye girmez', { timeout: 120000 }, async t => {
