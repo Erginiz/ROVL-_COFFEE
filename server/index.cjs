@@ -1281,8 +1281,12 @@ async function runScan() {
       // spawn ffmpeg every fifteen seconds for the life of the station — the same mistake
       // the duration probe had to be cured of.
       for (const item of state[key]) {
-        if (tagBudget <= 0) break
         if (item.tagsRead) continue
+        // Ads keep the operator's filename, so there is nothing to read from them. Marking
+        // them without probing spends no ffmpeg at all and keeps them out of the loop for
+        // good, instead of running a process to throw its answer away.
+        if (key === 'ads') { item.tagsRead = true; changed = true; continue }
+        if (tagBudget <= 0) break
         const filePath = path.join(dir, item.filename)
         if (!fs.existsSync(filePath)) continue
         tagBudget -= 1
@@ -1290,10 +1294,8 @@ async function runScan() {
         item.tagsRead = true
         // Only overwrite with something real. A file whose tags cannot be read keeps the
         // name it has, which is its filename — the same place it came from.
-        if (key !== 'ads') {
-          if (probed.title) item.title = probed.title
-          if (probed.artist) item.artist = probed.artist
-        }
+        if (probed.title) item.title = probed.title
+        if (probed.artist) item.artist = probed.artist
         changed = true
       }
       // Loudness analysis decodes the whole file, so it is deliberately rationed: a few
