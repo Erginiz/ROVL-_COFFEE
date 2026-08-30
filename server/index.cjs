@@ -1015,7 +1015,22 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
   // announcement, which the operator heard as a music glitch on every slider move.
   broadcast(); res.json(publicState())
 })
-function probeDuration(filePath) {
+// A tag is only worth using if it says something. Whitespace-only titles are ordinary in
+// badly ripped libraries, and an empty name on the listener page reads as a broken station
+// rather than an untagged file — so anything blank falls back to the filename. The cap is
+// because nothing stops a file from carrying a kilobyte of title, which would then be sent
+// to every phone on every library broadcast and laid across the panel.
+const MAX_TAG_LENGTH = 200
+function cleanTag(value) {
+  const text = String(value || '').trim()
+  return text ? text.slice(0, MAX_TAG_LENGTH) : null
+}
+
+// `ffmpeg -i` prints the duration AND the file's Metadata block to stderr, and this function
+// was already capturing and parsing that text. Reading the title and artist out of the same
+// string costs nothing — no second process, no dependency — and it is the difference between
+// a customer seeing "01 - Track 01 / Bilinmeyen sanatçı" and the actual song.
+function probeFile(filePath) {
   return new Promise(resolve => {
     let output = ''
     let done = false
@@ -1024,14 +1039,30 @@ function probeDuration(filePath) {
     // Cap stderr accumulation so a file that makes ffmpeg spew endless diagnostics
     // can't grow this string without bound.
     child.stderr.on('data', chunk => { if (output.length < 65536) output += chunk.toString() })
-    child.on('error', () => finish(null))
+    child.on('error', () => finish({ durationSeconds: null, title: null, artist: null }))
     child.on('close', () => {
       const match = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
-      finish(match ? Math.round(Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])) : null)
+      // Only the container's own tags, not a stream's: ffmpeg prints a Metadata block for
+      // each stream too, and a cover-art stream's "title" is the name of the image.
+      const container = output.split(/\n\s*Stream #/)[0]
+      // Horizontal whitespace only. `\s` crosses newlines, so an empty `title  :` line let
+      // the match run on and capture the NEXT line — a file with a blank title came back
+      // named "encoder : Lavf60.16.100".
+      const tag = name => {
+        const found = container.match(new RegExp(`^[ \\t]*${name}[ \\t]*:[ \\t]*([^\\r\\n]+)$`, 'im'))
+        return found ? cleanTag(found[1]) : null
+      }
+      finish({
+        durationSeconds: match
+          ? Math.round(Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]))
+          : null,
+        title: tag('title'),
+        artist: tag('artist')
+      })
     })
     // Never let a hung/stalled ffmpeg (corrupt file, unavailable network share)
     // orphan the process or block the upload response forever.
-    const timer = setTimeout(() => finish(null), 15000)
+    const timer = setTimeout(() => finish({ durationSeconds: null, title: null, artist: null }), 15000)
     timer.unref?.()
   })
 }
@@ -1076,7 +1107,7 @@ function probeLoudness(filePath) {
       finish(gainForTrack(Number(loudness[1]), peak ? Number(peak[1]) : null))
     })
     // Analysis decodes the whole file (~1s for a typical track); the same generous
-    // ceiling probeDuration uses covers a stalled read on a bad file.
+    // ceiling probeFile uses covers a stalled read on a bad file.
     const timer = setTimeout(() => finish(null), 15000)
     timer.unref?.()
   })
@@ -1096,8 +1127,11 @@ app.post('/api/media/:kind', requireAdmin, (req, res, next) => {
 }, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Dosya bulunamadı' })
   const kind = req.params.kind
-  const title = path.parse(req.file.originalname).name
-  const item = { id: crypto.randomUUID(), title, artist: 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: await probeDuration(req.file.path), gainDb: await probeLoudness(req.file.path) ?? 0, addedAt: new Date().toISOString() }
+  const probed = await probeFile(req.file.path)
+  // The file's own tags win over its name: an operator uploading '01 - Track 01.mp3' means
+  // the song inside it, and that is what the customer sees on the listener page.
+  const title = probed.title || path.parse(req.file.originalname).name
+  const item = { id: crypto.randomUUID(), title, artist: probed.artist || 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: probed.durationSeconds, gainDb: await probeLoudness(req.file.path) ?? 0, addedAt: new Date().toISOString() }
   // The file is on disk before the two ffmpeg probes above run, so a folder scan during
   // that second or two sees it, finds no library entry, and adds one of its own — then this
   // handler added a SECOND entry for the same file. Both survive pruning (the file exists),
@@ -1191,7 +1225,8 @@ async function runScan() {
       const present = new Set(files)
       for (const filename of files) {
         if (state[key].some(item => item.filename === filename)) continue
-        const item = { id: crypto.randomUUID(), title: path.parse(filename).name, artist: 'Bilinmeyen sanatçı', filename, durationSeconds: await probeDuration(path.join(dir, filename)), addedAt: new Date().toISOString() }
+        const probed = await probeFile(path.join(dir, filename))
+        const item = { id: crypto.randomUUID(), title: probed.title || path.parse(filename).name, artist: probed.artist || 'Bilinmeyen sanatçı', filename, durationSeconds: probed.durationSeconds, addedAt: new Date().toISOString() }
         // Re-check after the await. Probing yields for a second or so, and an upload of this
         // very file can land its own entry in that gap — the check above was made against a
         // library that no longer exists. Skipping here is what keeps the track from being
@@ -1210,7 +1245,7 @@ async function runScan() {
         if ((item.probeFailures || 0) >= MAX_PROBE_ATTEMPTS) continue
         const filePath = path.join(dir, item.filename)
         if (!fs.existsSync(filePath)) continue
-        const duration = await probeDuration(filePath)
+        const duration = (await probeFile(filePath)).durationSeconds
         if (duration) {
           item.durationSeconds = duration
           delete item.probeFailures
