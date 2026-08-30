@@ -196,20 +196,41 @@ function useStation() {
 const LIVE_EDGE_CATCHUP = 1.0   // sn — bunun üstünde hızlan
 const LIVE_EDGE_OK = 0.5        // sn — bunun altında normale dön
 const LIVE_EDGE_RESYNC = 5.0    // sn — bunun üstünde atlayarak eşitle
+// What to do about a phone that has drifted behind the live edge, as a plain decision. It
+// runs on every listening phone every two seconds and both of its outcomes are audible — a
+// 3% speed-up is a subtly sharp café, a seek is a jump mid-song — and none of it was covered
+// by anything. Separated out so the thresholds can be tested directly, the way this project
+// already does for the ezan window and the login brake.
+//
+// Returns null when there is nothing to do, so "leave it alone" is a distinct answer rather
+// than a rate that happens to equal the current one.
+export function liveEdgeAction(behind, currentRate = 1) {
+  if (!Number.isFinite(behind) || behind < 0) return null
+  // Far behind: catching up by playing faster would take minutes and be audible the whole
+  // time. Jump instead, and land slightly behind the edge rather than exactly on it — right
+  // at the edge the next network hiccup underruns the buffer.
+  if (behind > LIVE_EDGE_RESYNC) return { seek: true, rate: 1 }
+  if (behind > LIVE_EDGE_CATCHUP) return { seek: false, rate: 1.03 }
+  // Below the OK mark, always return to normal speed. Without this the phone would stay
+  // slightly fast for as long as it kept drifting in and out of the middle band.
+  if (behind < LIVE_EDGE_OK) return { seek: false, rate: 1 }
+  // Between OK and CATCHUP: deliberately do nothing, so a phone hovering around a threshold
+  // does not flip speed every two seconds.
+  return { seek: false, rate: currentRate }
+}
+
 function useLiveEdge(audioRef) {
   useEffect(() => {
     const timer = setInterval(() => {
       const audio = audioRef.current
       if (!audio || audio.paused || !audio.buffered.length) return
       const edge = audio.buffered.end(audio.buffered.length - 1)
-      const behind = edge - audio.currentTime
-      if (!Number.isFinite(behind) || behind < 0) return
-      if (behind > LIVE_EDGE_RESYNC) {
-        try { audio.currentTime = edge - LIVE_EDGE_OK; audio.playbackRate = 1 } catch {}
-        return
-      }
-      const wanted = behind > LIVE_EDGE_CATCHUP ? 1.03 : (behind < LIVE_EDGE_OK ? 1 : audio.playbackRate)
-      if (audio.playbackRate !== wanted) { try { audio.playbackRate = wanted } catch {} }
+      const action = liveEdgeAction(edge - audio.currentTime, audio.playbackRate)
+      if (!action) return
+      try {
+        if (action.seek) audio.currentTime = edge - LIVE_EDGE_OK
+        if (audio.playbackRate !== action.rate) audio.playbackRate = action.rate
+      } catch {}
     }, 2000)
     return () => clearInterval(timer)
   }, [audioRef])
