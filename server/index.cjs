@@ -12,6 +12,7 @@ const ffmpegBinary = require('ffmpeg-static')
 const ffmpegPath = process.resourcesPath && ffmpegBinary.includes('app.asar') ? ffmpegBinary.replace('app.asar', 'app.asar.unpacked') : ffmpegBinary
 const { AudioEngine } = require('./audio-engine.cjs')
 const { findActiveWindow } = require('./ezan-window.cjs')
+const { createLoginBrake } = require('./login-brake.cjs')
 
 const app = express()
 const port = Number(process.env.PORT || 8090)
@@ -619,6 +620,8 @@ const LOGIN_WINDOW = 5 * 60000
 const LOGIN_MAX = 5
 const LOGIN_LOCK = 60000
 const loginFailures = new Map()
+// The address-blind brake. See server/login-brake.cjs for why the per-address one is not enough.
+const loginBrake = createLoginBrake()
 function loginLocked(ip) { const r = loginFailures.get(ip); return !!(r && r.lockedUntil > Date.now()) }
 function noteLoginFailure(ip) {
   const now = Date.now()
@@ -718,8 +721,22 @@ app.get('/api/state', (req, res) => { noteReachedVia(req); res.json(publicState(
 // A phone trades the typed code for a session token. The code is never sent back.
 app.post('/api/admin/login', (req, res) => {
   const ip = req.socket?.remoteAddress || 'bilinmiyor'
+  // The per-address lock below is the polite brake; this one is the real one. Measured on
+  // this machine: an address that has been locked out can log in from a different address
+  // on its very first try, so counting per address bounds nothing an attacker cares about.
+  if (loginBrake.locked()) {
+    return res.status(429).json({ error: 'Çok fazla hatalı deneme. Birkaç dakika sonra tekrar deneyin.' })
+  }
   if (loginLocked(ip)) return res.status(429).json({ error: 'Çok fazla hatalı deneme. Bir dakika sonra tekrar deneyin.' })
-  if (!codeMatches(req.body?.code)) { noteLoginFailure(ip); return res.status(403).json({ error: 'Kod yanlış' }) }
+  if (!codeMatches(req.body?.code)) {
+    noteLoginFailure(ip)
+    // Reported once per episode, by the brake itself — a burst of failed logins on the café
+    // Wi-Fi is worth knowing about, and writing a line per attempt would bury the history
+    // under the attack.
+    if (loginBrake.noteFailure()) log('system', 'Çok sayıda hatalı yönetici kodu denemesi — girişler geçici olarak durduruldu')
+    return res.status(403).json({ error: 'Kod yanlış' })
+  }
+  loginBrake.noteSuccess()
   loginFailures.delete(ip)
   log('system', 'Telefondan yönetici girişi yapıldı')
   broadcast()

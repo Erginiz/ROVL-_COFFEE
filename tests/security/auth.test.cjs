@@ -12,7 +12,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert')
-const { startServer, makeTone, lanIp } = require('../helpers/harness.cjs')
+const { startServer, makeTone, lanIp, sleep } = require('../helpers/harness.cjs')
 
 const LAN = lanIp()
 const skip = LAN ? false : 'bu makinede LAN adresi yok (auth yolu test edilemez)'
@@ -199,4 +199,43 @@ test('ses olmayan dosya yüklenemez (uzantı mimetype’a rağmen)', { skip: fal
   const fs = require('fs'), path = require('path')
   const landed = fs.readdirSync(path.join(server.dataDir, 'Music'))
   assert.ok(!landed.some(f => f.endsWith('.exe')), 'reddedilen dosya diske yazılmamalı')
+})
+
+// Measured against the running station before this was written: lock one address out with
+// five wrong codes, then log in from a different address and the very first attempt is
+// answered normally. Changing source address is free — an IPv6 privacy extension does it
+// unprompted — so the per-address counter never bounded the guess rate. With the source
+// public, an attacker walking a six-digit space at HTTP speed is hours, not months.
+test('adres değiştirerek kilit atlanabiliyordu — artık toplam deneme sayılıyor', { skip, timeout: 400000 }, async t => {
+  const server = await startServer({ music: [] })
+  t.after(() => server.stop())
+
+  // Two distinct keys are all this machine offers: every 127.x address is reported as one
+  // address by Windows, and the LAN address is the second. So the attack is played out the
+  // way a real one would be — wait out each address lock and come back — rather than faked.
+  const lan = LAN
+  const attempt = host => server.raw('/api/admin/login', 'POST',
+    JSON.stringify({ code: '000000' }), { 'content-type': 'application/json' }, host)
+
+  // Half a dozen rounds of five, alternating addresses and waiting out the per-address lock.
+  let sawGlobalStop = false
+  for (let round = 0; round < 4 && !sawGlobalStop; round++) {
+    for (const host of ['127.0.0.1', lan]) {
+      for (let i = 0; i < 5; i++) {
+        const res = await attempt(host)
+        if (res.status === 429 && /birkaç dakika/i.test(res.body || '')) { sawGlobalStop = true; break }
+      }
+      if (sawGlobalStop) break
+    }
+    if (!sawGlobalStop) await sleep(61000)      // adres kilidinin dolmasını bekle
+  }
+
+  assert.ok(sawGlobalStop, 'yeterince hatalı denemeden sonra tüm girişler durdurulmalı')
+
+  // And it must reach the operator: a burst of failed logins on the café Wi-Fi is worth
+  // knowing about, once.
+  const history = (await server.state()).history
+  const notices = history.filter(entry => /hatalı yönetici kodu/i.test(entry.title || ''))
+  assert.ok(notices.length >= 1, `operatör uyarılmalı: ${JSON.stringify(history.slice(0, 3))}`)
+  assert.ok(notices.length <= 2, `${notices.length} kez yazılmış — saldırı günlüğü doldurmamalı`)
 })
