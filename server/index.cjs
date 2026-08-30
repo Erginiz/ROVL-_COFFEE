@@ -67,7 +67,10 @@ const MAX_PROBE_ATTEMPTS = 3
 for (const directory of [root, certDir, ...Object.values(mediaRoots)]) fs.mkdirSync(directory, { recursive: true })
 
 const defaults = {
-  station: { name: 'Rovli Radyo', logo: null, port: 8090 },
+  // `port` used to be stored here too. Nothing read it — the port the station actually binds
+  // comes from PORT (line 17) — so an operator editing it would have changed nothing while
+  // the saved number drifted away from reality. The real port is published under `network`.
+  station: { name: 'Rovli Radyo', logo: null },
   playback: { status: 'stopped', musicVolume: 76, adVolume: 76, shuffle: true, loop: true, currentId: null, currentType: null, currentStartedAt: null, currentOffsetSeconds: 0, tracksSinceAd: 0, nextTimedAdAt: null },
   // `scheduled` (clock-time ads) and `recordAnnouncements` used to sit here. Neither was ever
   // read anywhere: no endpoint accepted them, no code branched on them, nothing displayed
@@ -309,6 +312,10 @@ function publicState() {
       return {
         ip, ips, preferred,
         preferredIp: preferred,
+        // Published because the panel prints these addresses for the operator to read out.
+        // It used to write ":8090" as a literal while the server bound whatever PORT said —
+        // two sources of truth for the one string a customer types into their phone.
+        port, httpsPort,
         // The saved address is gone (adapter unplugged, Wi-Fi dropped, router swapped). The
         // station keeps working on whatever address it does have, but the QR now points
         // somewhere else than the operator chose — which is exactly the situation where

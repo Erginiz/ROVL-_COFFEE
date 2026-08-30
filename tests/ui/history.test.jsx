@@ -8,7 +8,7 @@
 
 import { describe, test, expect, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
-import { HistoryCard, UpNext } from '../../src/main.jsx'
+import { HistoryCard, UpNext, ConnectCard } from '../../src/main.jsx'
 
 const entry = (type, title, minutesAgo = 0) => ({
   id: `${type}-${title}-${minutesAgo}`,
@@ -124,5 +124,27 @@ describe('Sırada listesi', () => {
   test('kuyruk bilgisi hiç yoksa çökmez', () => {
     const { container } = render(<UpNext station={{}} />)
     expect(container.querySelector('.up-next')).toBeNull()
+  })
+})
+
+// The café's whole problem was phones being handed an address that did not work. The panel
+// prints those addresses, and it printed the port as a literal ":8090" while the server
+// published whatever port it had actually bound. Two sources of truth for the one string an
+// operator reads out loud to a customer.
+describe('Bağlantı adresleri', () => {
+  const netStation = port => ({
+    network: {
+      ip: '192.168.1.14', port,
+      ips: [{ ip: '192.168.1.14', name: 'Wi-Fi' }, { ip: '10.0.0.5', name: 'Ethernet' }],
+      reachedVia: [], preferred: null, preferredMissing: false,
+      webUrl: `http://192.168.1.14:${port}/listen`
+    }
+  })
+
+  test('gösterilen adresler sunucunun gerçekten dinlediği portu kullanır', () => {
+    const { container } = render(<ConnectCard station={netStation(9317)} />)
+    const shown = [...container.querySelectorAll('code')].map(node => node.textContent).join(' ')
+    expect(shown).toContain('9317')
+    expect(shown).not.toContain('8090')
   })
 })
