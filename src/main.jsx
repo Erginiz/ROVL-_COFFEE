@@ -164,11 +164,15 @@ function useStation() {
       events.onmessage = event => {
         try {
           const incoming = JSON.parse(event.data)
-          setStation(previous => previous ? {
+          setStation(previous => ({
             ...previous, ...incoming,
-            music: incoming.music ?? previous.music,
-            ads: incoming.ads ?? previous.ads
-          } : incoming)
+            // Falling all the way back to an empty list matters only in a case the server
+            // does not produce — it always sends the library on a fresh connection — but a
+            // missing array here would throw inside a render and leave a blank page with
+            // nothing in the console. Two characters against the worst failure mode there is.
+            music: incoming.music ?? previous?.music ?? [],
+            ads: incoming.ads ?? previous?.ads ?? []
+          }))
         } catch {}
       }
       // Surface the failure and reconnect instead of silently freezing on stale data.
