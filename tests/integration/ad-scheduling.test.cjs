@@ -11,6 +11,7 @@ const assert = require('node:assert')
 const fs = require('fs')
 const path = require('path')
 const { startServer, makeTone, waitFor, sleep } = require('../helpers/harness.cjs')
+const { measureBroadcast } = require('../helpers/audio-analysis.cjs')
 
 // Watches what goes on air and records the sequence of types (music/ad).
 async function recordAirplay(server, seconds) {
@@ -133,4 +134,42 @@ test('reklam bittiğinde müziğe dönülür', { timeout: 180000 }, async t => {
     return s.playback.currentType === 'music' ? s : null
   }, { timeoutMs: 60000, intervalMs: 500, label: 'müziğe dönüldü' })
   assert.equal(backToMusic.playback.currentType, 'music', 'reklamdan sonra müzik çalmalı')
+})
+
+// Every test above reads currentType from the state. An ad that is selected, counted and
+// logged — but whose file never reaches the speakers — passes all of them, and the café loses
+// the thing it is paid for without anyone noticing. Ads are the one part of this station that
+// is a business obligation, so at least once it has to be checked where it matters.
+//
+// Music and ads are given tones an octave and a half apart, so the broadcast itself says
+// which one is on the air.
+test('reklam ekranda değil, hoparlörde çalar', { timeout: 300000 }, async t => {
+  const MUSIC_HZ = 300
+  const AD_HZ = 1200
+  const server = await startServer({ music: [makeTone(120, MUSIC_HZ)], ads: [makeTone(20, AD_HZ)] })
+  t.after(() => server.stop())
+
+  await server.play()
+  const hearingMusic = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > 0.05 && measured.frequency < 700 ? measured : null
+  }, { timeoutMs: 60000, intervalMs: 0, label: 'önce müzik duyulsun' })
+  assert.ok(hearingMusic.frequency < 700, `hazırlık: müzik tonu bekleniyordu, ölçülen: ${Math.round(hearingMusic.frequency)} Hz`)
+
+  await server.api('/api/control', 'POST', { action: 'manualAd' })
+
+  const hearingAd = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.frequency > 700 ? measured : null
+  }, { timeoutMs: 60000, intervalMs: 0, label: 'reklam duyulsun' })
+  assert.ok(hearingAd.rms > 0.05, `reklam duyulur seviyede olmalı, seviye: ${hearingAd.rms.toFixed(4)}`)
+  assert.ok(hearingAd.frequency > 700, `yayında reklam tonu olmalı, ölçülen: ${Math.round(hearingAd.frequency)} Hz`)
+
+  // And the café must get its music back — an ad that leaves the station on the ad folder
+  // would play advertisements at the customers all afternoon.
+  const backToMusic = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > 0.05 && measured.frequency < 700 ? measured : null
+  }, { timeoutMs: 90000, intervalMs: 0, label: 'müziğe dönülsün' })
+  assert.ok(backToMusic.frequency < 700, `reklam bitince müzik dönmeli, ölçülen: ${Math.round(backToMusic.frequency)} Hz`)
 })
