@@ -46,17 +46,24 @@ function assessFirewall({ profiles = [], rules = [] } = {}) {
   })
 
   const blocked = networks.filter(network => !network.covered)
+  // Two very different faults look identical from the outside, and the fix for one is useless
+  // for the other. No rules at all means the installer never got to write them — it needs
+  // administrator rights — and telling that operator to change their network category would
+  // send them somewhere the problem is not.
+  const noRulesAtAll = allowing.length === 0
+
   return {
     checked: networks.length > 0,
     networks,
     blocked,
+    noRulesAtAll: noRulesAtAll && networks.length > 0,
     // Only a real problem: at least one live network on which nothing lets phones in.
     problem: networks.length > 0 && blocked.length > 0,
-    // Written for the operator, who needs to know what to DO — the category is the thing
-    // they can change in one click, and it is where the fix usually is.
-    message: blocked.length
-      ? `"${blocked[0].name}" ağı ${blocked[0].category === 'Public' ? '"Genel"' : `"${blocked[0].category}"`} olarak işaretli ve bu ağı kapsayan bir güvenlik duvarı izni yok — telefonlar bağlanamaz. Windows ağ ayarlarından bu ağı "Özel" yapın.`
-      : null
+    // Written for the operator, who needs to know what to DO.
+    message: !blocked.length ? null
+      : noRulesAtAll
+        ? 'Windows güvenlik duvarında bu programa ait bir izin yok — telefonlar bağlanamaz. Kurulum dosyasını sağ tıklayıp "Yönetici olarak çalıştır" ile tekrar kurun.'
+        : `"${blocked[0].name}" ağı ${blocked[0].category === 'Public' ? '"Genel"' : `"${blocked[0].category}"`} olarak işaretli ve bu ağı kapsayan bir güvenlik duvarı izni yok — telefonlar bağlanamaz. Windows ağ ayarlarından bu ağı "Özel" yapın.`
   }
 }
 

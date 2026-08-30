@@ -98,3 +98,34 @@ test('kategorisi bilinmeyen ağ hakkında hüküm verilmez', () => {
   assert.equal(result.blocked.length, 1, 'kategori bilinmiyorsa kapsandığı da iddia edilemez')
   assert.ok(result.message, 'yine de bir şey söylenmeli')
 })
+
+test('hiç kural yokken doğru çözümü söyler', () => {
+  // Two faults that look identical from outside and have opposite fixes. The installer needs
+  // administrator rights to write its rules; if it never got them there is nothing to scope,
+  // and telling this operator to change their network category sends them to the wrong place
+  // entirely — the network is not the problem.
+  const result = assessFirewall({ profiles: [network('Kafe', 'Private')], rules: [] })
+  assert.equal(result.problem, true)
+  assert.equal(result.noRulesAtAll, true)
+  assert.match(result.message, /Yönetici olarak çalıştır/)
+  assert.doesNotMatch(result.message, /Özel/, 'ağ kategorisi bu arızanın çözümü değil')
+})
+
+test('kural var ama kapsamıyorsa ağ kategorisi çözümdür', () => {
+  const result = assessFirewall({
+    profiles: [network('Kafe', 'Public')],
+    rules: [rule('Rovli Radyo', 'Private')]
+  })
+  assert.equal(result.noRulesAtAll, false)
+  assert.match(result.message, /Özel/)
+})
+
+test('yalnızca kapalı kural varken de "izin yok" denir', () => {
+  // A disabled rule is not a rule. But it is also not "never installed" — this is the case
+  // where someone turned it off, so the honest reading is still that no permission exists.
+  const result = assessFirewall({
+    profiles: [network('Kafe', 'Private')],
+    rules: [{ displayName: 'Rovli Radyo', profile: 'Any', enabled: false, action: 'Allow' }]
+  })
+  assert.equal(result.noRulesAtAll, true)
+})
