@@ -101,8 +101,49 @@ function mergeState(saved) {
   }
   return out
 }
+// A café loses power. The station saves about once a second while it is playing, so sooner or
+// later the mains go down in the middle of a write and `station.json` is left half-finished.
+//
+// Two files make that survivable. Every save is written to a temporary file and then renamed
+// over the real one — a rename is atomic, so the station file is always either the whole old
+// state or the whole new one, never half of either. The previous state is kept alongside it,
+// so even a crash between the two renames leaves one complete copy on disk.
+const backupPath = `${statePath}.yedek`
+const tempPath = `${statePath}.yazi`
+
+// What went wrong on the way in, so it can be logged once the history exists (this runs before
+// `log()` is defined — the state it would write to is the very thing being loaded).
+let recoveryNote = null
+
+function tryRead(file) {
+  try { return mergeState(JSON.parse(fs.readFileSync(file, 'utf8'))) } catch { return null }
+}
+// Damaged bytes are the only evidence of what actually happened. Renaming them out of the way
+// preserves that and still frees the name; it must never be an overwrite.
+function setAside(file) {
+  try {
+    if (!fs.existsSync(file) || !fs.statSync(file).size) return
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    fs.renameSync(file, path.join(root, `station.bozuk-${stamp}.json`))
+  } catch (error) { console.error('Bozuk durum dosyası saklanamadı:', error.message) }
+}
 function readState() {
-  try { return mergeState(JSON.parse(fs.readFileSync(statePath, 'utf8'))) } catch { return structuredClone(defaults) }
+  const main = tryRead(statePath)
+  if (main) return main
+  // Nothing there at all is a first run, not an incident — say nothing.
+  const hadFile = fs.existsSync(statePath)
+
+  const backup = tryRead(backupPath)
+  if (backup) {
+    setAside(statePath)
+    recoveryNote = 'Durum dosyası bozuktu, yedekten kurtarıldı'
+    return backup
+  }
+  if (hadFile) {
+    setAside(statePath)
+    recoveryNote = 'Durum dosyası ve yedeği okunamadı, istasyon boş başlatıldı'
+  }
+  return structuredClone(defaults)
 }
 let state = readState()
 // Migrate old installs: playback used to have one shared `volume`. Split it into
@@ -117,7 +158,19 @@ let listeners = new Map()
 let clients = new Set()
 
 let saveTimer = null
-function saveNow() { try { fs.writeFileSync(statePath, JSON.stringify(state, null, 2)) } catch (error) { console.error('Durum kaydedilemedi:', error.message) } }
+function saveNow() {
+  try {
+    // Write somewhere harmless first and force it to the platter: without the fsync the
+    // rename can land while the new file's contents are still only in the OS cache, which
+    // is the same torn file with extra steps.
+    const handle = fs.openSync(tempPath, 'w')
+    try { fs.writeFileSync(handle, JSON.stringify(state, null, 2)); fs.fsyncSync(handle) } finally { fs.closeSync(handle) }
+    // Keep the outgoing state as the backup before replacing it. If power fails between
+    // these two renames the backup is a complete, if slightly stale, station.
+    try { if (fs.existsSync(statePath)) fs.renameSync(statePath, backupPath) } catch {}
+    fs.renameSync(tempPath, statePath)
+  } catch (error) { console.error('Durum kaydedilemedi:', error.message) }
+}
 // Coalesce frequent saves (heartbeats, controls, ticks) into at most one disk
 // write per second so a busy station never thrashes the event loop with I/O.
 function save() { if (saveTimer) return; saveTimer = setTimeout(() => { saveTimer = null; saveNow() }, 1000); saveTimer.unref?.() }
@@ -1176,6 +1229,10 @@ function sweepAuth() {
 const tickTimer = setInterval(() => { cleanListeners(); sweepAuth(); maybeSendScheduledReport(); broadcast(); scanLibrary().catch(() => {}) }, 15000)
 tickTimer.unref()
 resetTimedAd()
+// Recovery happened before `log()` existed — the history it writes to is what was being
+// loaded. Report it now, so a power cut leaves a trace the operator can actually find
+// instead of a station that quietly looks freshly installed.
+if (recoveryNote) { log('system', recoveryNote); recoveryNote = null }
 scanLibrary().catch(() => {})
 // Catch-all cleanup: kill ffmpeg and flush state on ANY exit (incl. Electron
 // quit, which may not raise SIGTERM), so no orphaned ffmpeg.exe is left behind.

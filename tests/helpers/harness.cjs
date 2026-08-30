@@ -202,14 +202,16 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
     decoder: () => ffmpegChildrenOf(proc.pid).find(isDecoder),
     state: async () => (await api('/api/state')).json,
     play: () => api('/api/control', 'POST', { action: 'play' }),
-    async stop() {
+    // `keepData` leaves the folder behind so a test can inspect what was written or boot a
+    // second station on the same data — the only way to test what survives a restart.
+    async stop({ keepData = false } = {}) {
       // Kill the whole tree: an abrupt parent death is exactly the case where an orphan
       // could survive, and a leaked ffmpeg would poison later tests in the same run.
       const kids = ffmpegChildrenOf(proc.pid)
       try { proc.kill('SIGKILL') } catch {}
       await sleep(400)
       for (const k of kids) if (pidAlive(k.pid)) killPid(k.pid)
-      try { fs.rmSync(dataDir, { recursive: true, force: true }) } catch {}
+      if (!keepData) { try { fs.rmSync(dataDir, { recursive: true, force: true }) } catch {} }
     }
   }
 
