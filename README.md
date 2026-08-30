@@ -71,14 +71,23 @@ npm run pack       # testler geçmeden paket üretilmez
 
 ## Ağ sorunlarında
 
-Kafede telefonlar bağlanamıyorsa:
+Kafede telefonlar bağlanamıyorsa, o bilgisayarda PowerShell'i **yönetici olarak** açıp:
 
 ```bash
-powershell -ExecutionPolicy Bypass -File scripts/ag-teshis.ps1
+irm https://raw.githubusercontent.com/Erginiz/ROVL-_COFFEE/main/scripts/ag-teshis.ps1 | iex
 ```
 
-Adresleri, güvenlik duvarı kurallarını, uygulamanın gördüğü durumu ve **telefonların
-gerçekten hangi adresten ulaştığını** tek ekranda gösterir.
+Kafedeki bilgisayarda bu depo yok — kurulu uygulama var. Bu yüzden komut dosyayı
+doğrudan indirip çalıştırır; deponun elinizde olmasını gerektiren
+`-File scripts/ag-teshis.ps1` biçimi orada işe yaramaz. (Depoyu klonladıysanız o da
+çalışır: `powershell -ExecutionPolicy Bypass -File scripts/ag-teshis.ps1`.)
+
+Adresleri, uygulamanın gördüğü durumu, **telefonların gerçekten hangi adresten
+ulaştığını** ve şu üçünü ayırt eden bir hüküm verir: güvenlik duvarı izni hiç yok mu,
+izin var ama bu ağı kapsamıyor mu, yoksa portu iki program birden mi dinliyor.
+Üçünün çözümü farklıdır ve çıktı hangisi olduğunu söyler.
+
+Hiçbir ayarı değiştirmez; sadece okur ve yazdırır.
 
 ## Yapı
 
