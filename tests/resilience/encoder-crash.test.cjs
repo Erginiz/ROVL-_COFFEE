@@ -17,6 +17,7 @@
 const test = require('node:test')
 const assert = require('node:assert')
 const { startServer, makeTone, waitFor, pidAlive } = require('../helpers/harness.cjs')
+const { measureBroadcast } = require('../helpers/audio-analysis.cjs')
 
 test('encoder çökmesinden sonra yayın kendini toparlar', { timeout: 120000 }, async t => {
   const server = await startServer({ music: [makeTone(30, 440)] })
@@ -49,6 +50,16 @@ test('encoder çökmesinden sonra yayın kendini toparlar', { timeout: 120000 },
   const window2 = await meter.sample(3000)
   assert.ok(window1 > 5000, `kurtarma sonrası 1. pencere akmalı, alınan: ${window1} bayt`)
   assert.ok(window2 > 5000, `kurtarma sonrası 2. pencere akmalı (sürekli akış), alınan: ${window2} bayt`)
+
+  // Bytes prove the encoder is alive and producing; they do NOT prove the café can hear
+  // anything. A respawned encoder fed nothing but silence emits MP3 frames at full rate and
+  // satisfies every assertion above while the room stays quiet — a hair away from the pump
+  // deadlock this test exists to guard. Measure the level too.
+  const heard = await waitFor(async () => {
+    const measured = await measureBroadcast(server.port, 4)
+    return measured.rms > 0.05 ? measured : null
+  }, { timeoutMs: 40000, intervalMs: 0, label: 'ses gerçekten duyulmalı' })
+  assert.ok(heard.rms > 0.05, `kurtarma sonrası MÜZİK duyulmalı, seviye: ${heard.rms.toFixed(4)}`)
   assert.ok(revived.pid, 'yeni encoder çalışıyor olmalı')
 })
 
