@@ -166,6 +166,8 @@ let listeners = new Map()
 let clients = new Set()
 
 let saveTimer = null
+// Whether the last save attempt failed — see the catch below for why this is not a counter.
+let saveFailing = false
 function saveNow() {
   try {
     // Write somewhere harmless first and force it to the platter: without the fsync the
@@ -177,7 +179,22 @@ function saveNow() {
     // these two renames the backup is a complete, if slightly stale, station.
     try { if (fs.existsSync(statePath)) fs.renameSync(statePath, backupPath) } catch {}
     fs.renameSync(tempPath, statePath)
-  } catch (error) { console.error('Durum kaydedilemedi:', error.message) }
+    // Back to normal: say so, and re-arm the warning for a future episode.
+    if (saveFailing) { saveFailing = false; log('system', 'Ayarlar yeniden kaydedilebiliyor') }
+  } catch (error) {
+    console.error('Durum kaydedilemedi:', error.message)
+    // Playing on through a full disk is right; doing it silently is not. Nothing is being
+    // saved — settings, new tracks and ad counters all vanish at the next restart — and the
+    // console line this used to be is invisible in the packaged app.
+    //
+    // Reported once per episode, not once per attempt: saves run about once a second, so a
+    // warning on every failure would push all 100 history entries out within two minutes and
+    // destroy the record it is trying to add to.
+    if (!saveFailing) {
+      saveFailing = true
+      log('system', `Ayarlar diske kaydedilemiyor: ${error.message}`)
+    }
+  }
 }
 // Coalesce frequent saves (heartbeats, controls, ticks) into at most one disk
 // write per second so a busy station never thrashes the event loop with I/O.
@@ -1122,6 +1139,8 @@ app.use((err, req, res, next) => {
 // Holds the in-flight scan's promise (null when idle) rather than a bare boolean, so a
 // caller can WAIT for a pass that is already running instead of silently getting nothing.
 let scanning = null
+// Whether the last scan threw — one report per episode, not one per 15-second pass.
+let scanFailing = false
 function scanLibrary() {
   if (scanning) return scanning
   scanning = runScan().finally(() => { scanning = null })
@@ -1213,7 +1232,16 @@ async function runScan() {
     // reject into its callers — /api/rescan would answer 500 and the 15s tick would log an
     // unhandled rejection. Report it and let the next pass try again.
     console.error('Kütüphane taraması başarısız:', error?.message)
+    // The operator drops files into the folder and presses "Yenile"; if the scan is failing
+    // nothing appears and the panel gives no reason. Throttled like the save warning: this
+    // runs every 15 seconds, so reporting each pass would bury the history.
+    if (!scanFailing) {
+      scanFailing = true
+      log('system', `Müzik klasörü taranamıyor: ${error?.message || 'bilinmeyen hata'}`)
+    }
+    return
   }
+  if (scanFailing) { scanFailing = false; log('system', 'Müzik klasörü yeniden taranabiliyor') }
 }
 // ── Durum raporu (uzaktan izleme) ────────────────────────────────────────────
 // The café PC is somewhere else, on a network nobody here can reach, running other business
@@ -1566,7 +1594,13 @@ function startServer({ updater } = {}) {
     })
     httpsServer.listen({ port: httpsPort, host: '::', exclusive: true },
       () => console.log(`Rovli Radyo HTTPS https://127.0.0.1:${httpsPort}`))
-  }).catch(error => console.error('HTTPS başlatılamadı:', error.message))
+  }).catch(error => {
+    console.error('HTTPS başlatılamadı:', error.message)
+    // Without HTTPS the phone cannot use its microphone — browsers refuse getUserMedia on a
+    // plain http page. The announcement button then just fails, and until now the only
+    // record was a console line nobody sees. Say it where the operator will look.
+    log('system', `Güvenli (HTTPS) sayfa açılamadı — telefondan anons yapılamaz: ${error.message}`)
+  })
   const shutdown = () => {
     shuttingDown = true
     clearInterval(tickTimer)      // stop ticks before closing so no write hits a dead socket

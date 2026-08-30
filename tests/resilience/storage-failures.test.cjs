@@ -107,12 +107,15 @@ test('durum dosyası yazılamazsa istasyon çalmaya devam eder', { timeout: 1800
   t.after(() => meter.close())
   await waitFor(() => meter.status === 200, { label: '/live.mp3' })
 
-  // Make the state path unwritable by replacing it with a directory: every write now fails.
+  // Blocking station.json itself no longer works: the save writes to a temp file and renames
+  // it into place, so an obstacle at the destination is simply moved aside. The temp path is
+  // where a save can actually be stopped — a directory there makes every open() fail.
   const statePath = path.join(server.dataDir, 'station.json')
   await waitFor(() => fs.existsSync(statePath), { timeoutMs: 25000, label: 'durum yazıldı' })
-  fs.rmSync(statePath, { force: true })
-  fs.mkdirSync(statePath)
-  t.after(() => { try { fs.rmSync(statePath, { recursive: true, force: true }) } catch {} })
+  const tempPath = statePath + '.yazi'
+  fs.rmSync(tempPath, { force: true })
+  fs.mkdirSync(tempPath)
+  t.after(() => { try { fs.rmSync(tempPath, { recursive: true, force: true }) } catch {} })
 
   // Keep using the station: settings changes will fail to persist but must not throw.
   for (let i = 0; i < 5; i++) {
@@ -210,4 +213,41 @@ test('çok uzun ve alışılmadık dosya adları kütüphaneyi bozmaz', { timeou
   t.after(() => meter.close())
   await waitFor(() => meter.status === 200, { label: '/live.mp3' })
   assert.ok((await meter.sample(4000)) > 5000, 'alışılmadık adlı dosya çalabilmeli')
+})
+
+test('kayıt yapılamadığı operatöre bildirilir ve günlüğü doldurmaz', { timeout: 180000 }, async t => {
+  // Playing on with a full disk is the right call — but doing it silently is not. Nothing is
+  // being saved: settings, new tracks, ad counters all vanish on the next restart, and the
+  // only sign was a console line that no one sees in the packaged app.
+  //
+  // The second half matters as much as the first. Saves are attempted about once a second,
+  // so a failure that reported itself every time would push all 100 history entries out
+  // within two minutes and destroy the very record it was trying to add to.
+  const server = await startServer({ music: [makeTone(20, 440)] })
+  t.after(() => server.stop())
+  await server.play()
+
+  const statePath = path.join(server.dataDir, 'station.json')
+  await waitFor(() => fs.existsSync(statePath), { timeoutMs: 25000, label: 'durum yazıldı' })
+  // See the note in the test above: the temp file is where a save can actually be blocked.
+  const tempPath = statePath + '.yazi'
+  fs.rmSync(tempPath, { force: true })
+  fs.mkdirSync(tempPath)
+  t.after(() => { try { fs.rmSync(tempPath, { recursive: true, force: true }) } catch {} })
+
+  // Long enough to matter: saves are debounced to one a second, so a short burst produces
+  // only two or three attempts and cannot tell a throttled warning from an unthrottled one.
+  // Measured with the throttle removed, this window produces well over ten.
+  for (let i = 0; i < 14; i++) {
+    await server.api('/api/control', 'POST', { action: 'musicVolume', value: 55 + i })
+    await sleep(1300)
+  }
+  await sleep(2000)
+
+  const history = (await server.state()).history
+  const warnings = history.filter(entry => /kaydedilemiyor|kaydedilemedi/i.test(entry.title || ''))
+  assert.ok(warnings.length >= 1,
+    `operatör uyarılmalı, günlük: ${JSON.stringify(history.slice(0, 4))}`)
+  assert.ok(warnings.length <= 2,
+    `uyarı ${warnings.length} kez tekrarlanmış — günlüğü dolduruyor`)
 })
