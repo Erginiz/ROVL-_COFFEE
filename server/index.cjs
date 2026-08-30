@@ -1396,7 +1396,12 @@ function buildReport(reason) {
       addresses: listLanIps(),
       preferredIp: state.station.preferredIp || null,
       preferredMissing: !!state.station.preferredIp && !listLanIps().some(x => x.ip === state.station.preferredIp),
-      reachedVia: reachedViaList()
+      reachedVia: reachedViaList(),
+      // The block above says WHERE the station can be reached; this says whether Windows is
+      // letting anyone in at all. Without it the report can show a perfectly good address
+      // list next to a station nothing can connect to, which is the exact situation this
+      // report was built to explain.
+      firewall: firewallPosture
     },
     engine: { ...engineCounters },
     ezan: { enabled: !!state.ezan.enabled, timesDate: state.ezan.timesDate, lastError: state.ezan.lastError },

@@ -78,6 +78,9 @@ test('yapılandırıldığında rapor gönderilir ve içeriği doğrudur', { tim
   assert.ok(body.app?.version, 'sürüm bilgisi olmalı')
   assert.equal(body.station.label, 'Rovli Coffee', 'kafe etiketi olmalı')
   assert.ok(body.network, 'ağ bilgisi olmalı — asıl teşhis buradan çıkıyor')
+  // Present as a key even before the check has run: 'not known yet' is information, and its
+  // absence would look like an older build that cannot answer the question at all.
+  assert.ok('firewall' in body.network, 'güvenlik duvarı hükmü raporda olmalı')
   assert.ok(Array.isArray(body.network.addresses), 'adres listesi olmalı')
   assert.ok(Array.isArray(body.network.reachedVia), 'telefonların ulaştığı adresler olmalı')
   assert.ok(body.engine, 'motor sayaçları olmalı')
