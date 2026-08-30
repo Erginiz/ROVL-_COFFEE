@@ -165,3 +165,65 @@ test('aşırı büyük seek değeri durumu bozmaz', { timeout: 120000 }, async t
   await waitFor(() => meter.status === 200, { label: '/live.mp3 after bad seeks' })
   assert.ok((await meter.sample(3000)) > 5000, 'kötü seek sonrası yayın sürmeli')
 })
+
+// Shuffle is a switch the operator flips when the room changes — the same eight songs in the
+// same order all afternoon is exactly the complaint it exists to answer. But the queue is
+// built once and drained; flipping the switch only changed a flag. The panel said "karıştır",
+// the next hours played in library order, and nothing on screen explained why.
+test('karıştırma açılınca sıradaki şarkılar gerçekten karışır', async t => {
+  const server = await startServer({ music: Array.from({ length: 10 }, (_, i) => makeTone(3, 300 + i * 40)) })
+  t.after(() => server.stop())
+
+  await server.api('/api/settings', 'PATCH', { playback: { shuffle: false } })
+  await server.play()
+  await waitFor(async () => ((await server.state()).queues.music.length > 3), { label: 'kuyruk kurulsun' })
+
+  const positions = state => state.queues.music.map(id => state.music.findIndex(track => track.id === id))
+  const inOrder = list => list.every((value, index) => index === 0 || value === list[index - 1] + 1)
+
+  const before = positions(await server.state())
+  assert.ok(inOrder(before), `hazırlık: kapalıyken sırayla olmalı, gelen: ${before.join(',')}`)
+
+  const changed = await server.api('/api/settings', 'PATCH', { playback: { shuffle: true } })
+  assert.equal(changed.status, 200)
+
+  const after = positions(await server.state())
+  assert.ok(after.length > 3, 'kuyruk boşaltılıp bırakılmamalı')
+  assert.ok(!inOrder(after), `karıştırma açıkken kuyruk hâlâ sırayla: ${after.join(',')}`)
+})
+
+test('karıştırma kapatılınca sıraya dönülür', async t => {
+  // The reverse is the same lie: a shuffled queue keeps playing at random after the operator
+  // has deliberately asked for the library order.
+  const server = await startServer({ music: Array.from({ length: 10 }, (_, i) => makeTone(3, 300 + i * 40)) })
+  t.after(() => server.stop())
+
+  await server.api('/api/settings', 'PATCH', { playback: { shuffle: true } })
+  await server.play()
+  await waitFor(async () => ((await server.state()).queues.music.length > 3), { label: 'kuyruk kurulsun' })
+
+  await server.api('/api/settings', 'PATCH', { playback: { shuffle: false } })
+  const state = await server.state()
+  const positions = state.queues.music.map(id => state.music.findIndex(track => track.id === id))
+  const ascending = positions.every((value, index) => index === 0 || value > positions[index - 1])
+  assert.ok(ascending, `kapatınca kütüphane sırasına dönmeli, gelen: ${positions.join(',')}`)
+})
+
+test('karıştırma değişimi çalan şarkıyı kesmez', async t => {
+  // Rebuilding the queue must not touch what is coming out of the speakers right now —
+  // an audible jump every time a switch is flipped would be a worse bug than the one fixed.
+  const server = await startServer({ music: Array.from({ length: 8 }, (_, i) => makeTone(6, 300 + i * 40)) })
+  t.after(() => server.stop())
+
+  await server.play()
+  await waitFor(async () => Boolean((await server.state()).playback.currentId), { label: 'çalmaya başlasın' })
+  const playing = (await server.state()).playback.currentId
+
+  await server.api('/api/settings', 'PATCH', { playback: { shuffle: true } })
+  await sleep(500)
+
+  const state = await server.state()
+  assert.equal(state.playback.currentId, playing, 'çalan parça değişmemeli')
+  assert.equal(state.playback.status, 'playing')
+  assert.ok(!state.queues.music.includes(playing), 'çalan parça hemen tekrar kuyruğa girmemeli')
+})

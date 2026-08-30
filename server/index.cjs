@@ -832,7 +832,21 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
   }
   // Shuffle is the only playback field the UI edits through settings; transport and volume
   // go through /api/control, which validates them.
-  if (playback && typeof playback.shuffle === 'boolean') state.playback.shuffle = playback.shuffle
+  if (playback && typeof playback.shuffle === 'boolean' && playback.shuffle !== state.playback.shuffle) {
+    state.playback.shuffle = playback.shuffle
+    // The queue was already built under the OLD setting and is drained one track at a time,
+    // so flipping the flag alone changed nothing an operator could hear: with a full library
+    // the next several hours still played in exactly the order they were queued in. The
+    // switch has to rebuild what has not been played yet.
+    //
+    // Only the upcoming list is rebuilt — the track on air is held in playback.currentId and
+    // is not part of the queue, so nothing jumps mid-song. It is also kept OUT of the fresh
+    // queue, or the song still playing would be picked again immediately after itself.
+    state.queues.music = []
+    buildMusicQueue()
+    state.queues.music = state.queues.music.filter(id => id !== state.playback.currentId)
+    save()
+  }
   if (adSettings) {
     if (typeof adSettings.songsEnabled === 'boolean') state.adSettings.songsEnabled = adSettings.songsEnabled
     if (typeof adSettings.timedEnabled === 'boolean') state.adSettings.timedEnabled = adSettings.timedEnabled
