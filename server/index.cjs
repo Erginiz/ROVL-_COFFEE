@@ -69,8 +69,13 @@ for (const directory of [root, certDir, ...Object.values(mediaRoots)]) fs.mkdirS
 const defaults = {
   station: { name: 'Rovli Radyo', logo: null, port: 8090 },
   playback: { status: 'stopped', musicVolume: 76, adVolume: 76, shuffle: true, loop: true, currentId: null, currentType: null, currentStartedAt: null, currentOffsetSeconds: 0, tracksSinceAd: 0, nextTimedAdAt: null },
-  adSettings: { songsEnabled: true, songsEvery: 5, timedEnabled: true, timedMinutes: 60, scheduled: [], manualResetsCounters: true },
-  microphone: { enabled: false, ducking: 35, recordAnnouncements: false },
+  // `scheduled` (clock-time ads) and `recordAnnouncements` used to sit here. Neither was ever
+  // read anywhere: no endpoint accepted them, no code branched on them, nothing displayed
+  // them. They were saved to disk and broadcast to every phone as settings that promised
+  // behaviour the station does not have. Dropping them is not a behaviour change — an old
+  // station.json that still carries them keeps them through mergeState and they stay inert.
+  adSettings: { songsEnabled: true, songsEvery: 5, timedEnabled: true, timedMinutes: 60, manualResetsCounters: true },
+  microphone: { enabled: false, ducking: 35 },
   music: [],
   ads: [],
   queues: { music: [], adCursor: 0 },
