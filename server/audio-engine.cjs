@@ -77,6 +77,26 @@ function softLimit(s) {
   return s
 }
 
+// Sum music and mic samples with gain, soft-limited into the 16-bit range. This is the
+// mixer: everything the café hears passes through this loop 50 times a second.
+//
+// The music level and the mic level are applied SEPARATELY on purpose. The music carries the
+// operator's volume, the ducking, and the track's own normalisation gain; the announcement
+// carries none of those — it must not get quieter because the song underneath it happens to
+// be a quiet recording, and it must not be ducked by its own ducking setting.
+function mixChunk(music, mic, musicVol) {
+  const out = Buffer.allocUnsafe(CHUNK)
+  for (let i = 0; i < CHUNK; i += 2) {
+    let s = 0
+    if (music) s += music.readInt16LE(i) * musicVol
+    if (mic && i < mic.length) s += mic.readInt16LE(i) * MIC_GAIN
+    // The tanh call only runs for samples that actually reach the knee, so the common
+    // case stays a plain multiply-and-add.
+    out.writeInt16LE(softLimit(s) | 0, i)
+  }
+  return out
+}
+
 // A simple FIFO of Buffers that hands back exactly N bytes at a time.
 class ByteQueue {
   constructor() { this.chunks = []; this.len = 0 }
@@ -347,19 +367,9 @@ class AudioEngine {
     return this.mix(music, mic, master * duck * this.currentGain)
   }
 
-  // Sum music and mic samples with gain, soft-limited into the 16-bit range.
-  mix(music, mic, musicVol) {
-    const out = Buffer.allocUnsafe(CHUNK)
-    for (let i = 0; i < CHUNK; i += 2) {
-      let s = 0
-      if (music) s += music.readInt16LE(i) * musicVol
-      if (mic && i < mic.length) s += mic.readInt16LE(i) * MIC_GAIN
-      // The tanh call only runs for samples that actually reach the knee, so the common
-      // case stays a plain multiply-and-add.
-      out.writeInt16LE(softLimit(s) | 0, i)
-    }
-    return out
-  }
+  // Kept as a method for the call site's sake; the work is the pure function below, which
+  // the tests drive directly rather than having to spawn ffmpeg to check arithmetic.
+  mix(music, mic, musicVol) { return mixChunk(music, mic, musicVol) }
 
   handleTrackEnd() {
     if (this.ended) return
@@ -539,4 +549,4 @@ class AudioEngine {
 
 // ByteQueue and softLimit are exported for the unit tests: both are pure, and reaching
 // them through a live AudioEngine would mean spawning ffmpeg to check arithmetic.
-module.exports = { AudioEngine, ByteQueue, softLimit, LIMIT_KNEE, LIMIT_CEILING }
+module.exports = { AudioEngine, ByteQueue, softLimit, mixChunk, CHUNK, MIC_GAIN, LIMIT_KNEE, LIMIT_CEILING }
