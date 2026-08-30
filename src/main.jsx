@@ -353,6 +353,23 @@ function Player({ station, control, save, audioRef, monitorReady, localVol, onLo
 // Sırada. The upcoming order was already being computed and sent on every update, and nothing
 // displayed it. Showing it costs nothing and answers a question the operator asks constantly
 // — is the next song right for the room? — early enough to do something about it.
+// The one line that says the café has gone silent. It was a hardcoded green sentence until
+// recently; now that it tells the truth, it also has to reach an operator who is not looking
+// at it. `role="status"` makes a screen reader announce the text when it CHANGES — so the
+// steady "aktif" line is silent, and the moment it turns into a fault it is spoken.
+//
+// One region for both states, deliberately: a message that moved between two elements would
+// read as two separate things appearing rather than one state changing.
+function BroadcastNotice({ station }) {
+  const broken = station.capabilities.flowing === false
+  return <section className="card notices">
+    <h2>Yayın Durumu</h2>
+    <p role="status" className={broken ? 'bad' : 'ok'}>{station.capabilities.message}</p>
+    <p className="muted">Hedef gecikme: yaklaşık {station.timing.targetLatencySeconds} sn</p>
+    <p className="muted">Telefonlar aynı Wi‑Fi ağında olmalıdır.</p>
+  </section>
+}
+
 function UpNext({ station }) {
   const queue = (station.nextMusic || []).slice(0, 5)
   if (!queue.length) return null
@@ -407,7 +424,7 @@ function EzanCard({ station, save }) {
         <div className="field"><label htmlFor="ezan-sure">Durma süresi</label><div className="dk"><input id="ezan-sure" type="number" min="1" max="60" value={ez.durationMinutes || 8} onChange={e => save({ ezan: { durationMinutes: Number(e.target.value) } })}/><span>dk</span></div></div>
       </div>
       {Object.keys(ez.times || {}).length ? <div className="ezan-times">{Object.entries(ez.times).map(([k, v]) => <span key={k} className={ez.active && ez.activePrayer === k ? 'on' : ''}><b>{k}</b> {v}</span>)}</div> : <p className="muted">Bugünün vakitleri çekiliyor…</p>}
-      {ez.lastError && <p className="warn">Vakitler alınamadı ({ez.lastError}). İnternet bağlantısını kontrol edin.</p>}
+      {ez.lastError && <p role="status" className="warn">Vakitler alınamadı ({ez.lastError}). İnternet bağlantısını kontrol edin.</p>}
     </>}
   </section>
 }
@@ -666,7 +683,7 @@ function Admin() {
       catch (err) { micRef.current = null; const msg = String(err?.message || err).slice(0, 140); alert('Mikrofona erişilemedi: ' + msg + '\n(Yönetim panelini bilgisayarda/Electron üzerinde açın; tarayıcıda mikrofon için 127.0.0.1 veya HTTPS gerekir.)') }
     }
   }
-  return <main className="admin-shell"><audio ref={audio} preload="none" src="/live.mp3" onPlaying={() => setMonitorReady(true)} onWaiting={() => setMonitorReady(false)} onStalled={() => { setMonitorReady(false); scheduleReconnect() }} onError={scheduleReconnect} onPause={() => setMonitorReady(false)} onEnded={() => { setMonitorReady(false); scheduleReconnect() }}/><header><div className="brand"><div className="brand-mark">R</div><div><h1 className="brand-title">Rovli Radio</h1><span>Rovli Coffee Müzik ve Anons Sistemi</span></div></div><div className="network"><i></i><span>{station.network.ip}:{station.network.port || 8090}</span><small>Yerel ağ yayını</small></div></header><div className="dashboard"><aside className="sidebar"><nav aria-label="Bölümler"><button className={'nav ' + (view === 'home' ? 'active' : '')} onClick={() => setView('home')}>Genel Bakış</button><button className={'nav ' + (view === 'music' ? 'active' : '')} onClick={() => setView('music')}>Müzik Kütüphanesi</button><button className={'nav ' + (view === 'ad' ? 'active' : '')} onClick={() => setView('ad')}>Reklamlar</button></nav><div className="sidebar-foot"><span>Dinleyici</span><strong>{station.listeners} kişi</strong></div></aside><div className="content">{view === 'home' ? <Dashboard station={station} control={control} setView={setView} mic={toggleMic} audioRef={audio} monitorReady={monitorReady} localVol={localVol} onLocalVol={changeLocalVol}/> : <Library station={station} kind={view}/>}</div><aside className="rightbar"><ConnectCard station={station}/><AdminCodeCard/><UpdateCard/><HistoryCard station={station}/><section className="card notices"><h2>Yayın Durumu</h2><p className={station.capabilities.flowing === false ? 'bad' : 'ok'}>{station.capabilities.message}</p><p className="muted">Hedef gecikme: yaklaşık {station.timing.targetLatencySeconds} sn</p><p className="muted">Telefonlar aynı Wi‑Fi ağında olmalıdır.</p></section></aside></div></main>
+  return <main className="admin-shell"><audio ref={audio} preload="none" src="/live.mp3" onPlaying={() => setMonitorReady(true)} onWaiting={() => setMonitorReady(false)} onStalled={() => { setMonitorReady(false); scheduleReconnect() }} onError={scheduleReconnect} onPause={() => setMonitorReady(false)} onEnded={() => { setMonitorReady(false); scheduleReconnect() }}/><header><div className="brand"><div className="brand-mark">R</div><div><h1 className="brand-title">Rovli Radio</h1><span>Rovli Coffee Müzik ve Anons Sistemi</span></div></div><div className="network"><i></i><span>{station.network.ip}:{station.network.port || 8090}</span><small>Yerel ağ yayını</small></div></header><div className="dashboard"><aside className="sidebar"><nav aria-label="Bölümler"><button className={'nav ' + (view === 'home' ? 'active' : '')} onClick={() => setView('home')}>Genel Bakış</button><button className={'nav ' + (view === 'music' ? 'active' : '')} onClick={() => setView('music')}>Müzik Kütüphanesi</button><button className={'nav ' + (view === 'ad' ? 'active' : '')} onClick={() => setView('ad')}>Reklamlar</button></nav><div className="sidebar-foot"><span>Dinleyici</span><strong>{station.listeners} kişi</strong></div></aside><div className="content">{view === 'home' ? <Dashboard station={station} control={control} setView={setView} mic={toggleMic} audioRef={audio} monitorReady={monitorReady} localVol={localVol} onLocalVol={changeLocalVol}/> : <Library station={station} kind={view}/>}</div><aside className="rightbar"><ConnectCard station={station}/><AdminCodeCard/><UpdateCard/><HistoryCard station={station}/><BroadcastNotice station={station}/></aside></div></main>
 }
 
 function Listener() {
@@ -801,4 +818,4 @@ if (rootElement) {
 
 // Exported for the tests. Nothing in the app imports this file — it is the entry point — so
 // these exports cost the bundle nothing and keep the components reachable.
-export { Admin, Listener, ConnectCard, UpdateCard, HistoryCard, UpNext, AdminCodeCard, EzanCard, Player, Progress, Status, TrackList, MasterBar, ErrorBoundary, IS_IOS, adminHeaders }
+export { Admin, BroadcastNotice, Listener, ConnectCard, UpdateCard, HistoryCard, UpNext, AdminCodeCard, EzanCard, Player, Progress, Status, TrackList, MasterBar, ErrorBoundary, IS_IOS, adminHeaders }

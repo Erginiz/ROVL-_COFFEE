@@ -5,7 +5,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
-import { AdminCodeCard, EzanCard, MasterBar, TrackList, Status, ErrorBoundary } from '../../src/main.jsx'
+import { AdminCodeCard, EzanCard, MasterBar, TrackList, Status, ErrorBoundary, BroadcastNotice } from '../../src/main.jsx'
 
 const baseStation = (overrides = {}) => ({
   station: { name: 'Rovli Radyo' },
@@ -177,5 +177,41 @@ describe('Şimdi çalıyor', () => {
   test('hiçbir şey çalmıyorsa yönlendirme metni çıkar', () => {
     render(<Status station={baseStation({ current: null })} />)
     expect(screen.getByText(/Müzik ekleyerek başlayın/)).toBeDefined()
+  })
+})
+
+// A screen reader announces a region only if it is marked as live. Nothing in this app was,
+// so the one line that says the café has gone silent changed on screen and said nothing —
+// the same failure class as the hardcoded green status it replaced, one layer out.
+describe('Değişen durum duyurulur', () => {
+  test('yayın durumu satırı canlı bölge olarak işaretlenir', () => {
+    const { container } = render(<BroadcastNotice station={{
+      capabilities: { flowing: false, message: 'Ses kodlayıcı çalışmıyor — yayın kesik.' },
+      timing: { targetLatencySeconds: 2 }
+    }} />)
+    const live = container.querySelector('[role="status"], [aria-live]')
+    expect(live).not.toBeNull()
+    expect(live.textContent).toContain('kesik')
+  })
+
+  test('sağlıklıyken de aynı bölge kullanılır (yer değiştirmez)', () => {
+    // A message that moves between elements reads as two different things; keeping one live
+    // region means the reader announces a change of state, not a change of layout.
+    const { container } = render(<BroadcastNotice station={{
+      capabilities: { flowing: true, message: 'Yerel MP3 yayın motoru aktif.' },
+      timing: { targetLatencySeconds: 2 }
+    }} />)
+    const live = container.querySelector('[role="status"], [aria-live]')
+    expect(live).not.toBeNull()
+    expect(live.textContent).toContain('aktif')
+  })
+
+  test('ezan hatası da duyurulur', () => {
+    const { container } = render(<EzanCard station={{
+      ezan: { enabled: true, il: 'İstanbul', ilce: '', durationMinutes: 8, active: false, times: {}, lastError: 'ağ hatası' }
+    }} control={() => {}} />)
+    const live = [...container.querySelectorAll('[role="status"], [aria-live]')]
+      .find(node => /alınamadı/i.test(node.textContent))
+    expect(live).toBeDefined()
   })
 })
