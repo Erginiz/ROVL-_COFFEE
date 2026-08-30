@@ -1217,6 +1217,9 @@ async function runScan() {
   let changed = false
   // Shared across both folders so a pass never analyses more than this many files total.
   let loudnessBudget = LOUDNESS_PER_SCAN
+  // ffmpeg -i only reads headers, so this can be more generous than the loudness budget:
+  // a 200-track library finishes back-filling in a few minutes of ordinary running.
+  let tagBudget = 8
   try {
     for (const [kind, key] of Object.entries(KIND_KEY)) {
       const dir = mediaRoots[kind]
@@ -1259,6 +1262,28 @@ async function runScan() {
             log('system', `Dosya okunamıyor, atlanacak: ${item.title}`)
           }
         }
+      }
+      // Tags for entries indexed before the station could read them. Without this, a café
+      // whose library is already scanned would see no change at all — the scan skips files
+      // it has seen, so only a pass over existing entries can fix their names.
+      //
+      // Rationed like the loudness pass, though far cheaper: `ffmpeg -i` reads headers and
+      // exits without decoding. Marked once either way, so an untagged library does not
+      // spawn ffmpeg every fifteen seconds for the life of the station — the same mistake
+      // the duration probe had to be cured of.
+      for (const item of state[key]) {
+        if (tagBudget <= 0) break
+        if (item.tagsRead) continue
+        const filePath = path.join(dir, item.filename)
+        if (!fs.existsSync(filePath)) continue
+        tagBudget -= 1
+        const probed = await probeFile(filePath)
+        item.tagsRead = true
+        // Only overwrite with something real. A file whose tags cannot be read keeps the
+        // name it has, which is its filename — the same place it came from.
+        if (probed.title) item.title = probed.title
+        if (probed.artist) item.artist = probed.artist
+        changed = true
       }
       // Loudness analysis decodes the whole file, so it is deliberately rationed: a few
       // tracks per pass, and only after durations are filled in (playback order depends

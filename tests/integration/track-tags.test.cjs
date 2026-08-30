@@ -116,3 +116,48 @@ test('etiket okuma yayını bozmaz', async t => {
 
   assert.ok((await meter.sample(3000)) > 5000, 'tarama sırasında yayın sürmeli')
 })
+
+// Everything above only helps a library that is scanned for the first time. The café already
+// has its music indexed, and the scan deliberately skips files it has seen — so without a
+// back-fill this change would appear to do nothing for the one person who actually has a
+// library, which is the worst possible outcome for a feature.
+test('mevcut kütüphanedeki adlar da sonradan düzeltilir', { timeout: 180000 }, async t => {
+  // The real upgrade, not an approximation of it: an entry written by an older version —
+  // filename as the title, no record of tags ever having been looked at — sitting next to a
+  // file that has carried its tags all along.
+  const seed = await startServer({ music: [] })
+  const dataDir = seed.dataDir
+  await seed.stop({ keepData: true })
+
+  fs.copyFileSync(taggedTone({ title: 'Düzeltilmiş Ad', artist: 'Gerçek Sanatçı' }),
+    path.join(dataDir, 'Music', 'eski.mp3'))
+  fs.writeFileSync(path.join(dataDir, 'station.json'), JSON.stringify({
+    music: [{ id: 'eski-1', title: 'eski', artist: 'Bilinmeyen sanatçı', filename: 'eski.mp3', durationSeconds: 3, addedAt: new Date().toISOString() }]
+  }, null, 2))
+
+  const server = await startServer({ dataDir, music: [] })
+  t.after(() => server.stop())
+
+  const fixed = await waitFor(async () => {
+    const track = findByFile((await server.state()).music, 'eski.mp3')
+    return track && track.title === 'Düzeltilmiş Ad' ? track : null
+  }, { timeoutMs: 90000, label: 'ad düzeltilsin' })
+  assert.equal(fixed.artist, 'Gerçek Sanatçı')
+  assert.equal(fixed.id, 'eski-1', 'kayıt yeniden oluşturulmamalı, düzeltilmeli')
+})
+
+test('etiketi olmayan eski kayıt sonsuza dek yeniden okunmaz', { timeout: 180000 }, async t => {
+  // The back-fill runs every 15 seconds for the life of the station. A file with no tags
+  // must be read once and then left alone, or an untagged library spawns ffmpeg for ever —
+  // the same mistake the duration probe already had to be cured of.
+  const server = await startServer({ music: [makeTone(3, 440)] })
+  t.after(() => server.stop())
+
+  const track = await waitFor(async () => {
+    const found = (await server.state()).music[0]
+    return found && found.tagsRead ? found : null
+  }, { timeoutMs: 60000, label: 'etiket okundu işareti' })
+
+  assert.equal(track.tagsRead, true, 'okunduğu işaretlenmeli')
+  assert.equal(track.title, 'track-0', 'etiketsiz dosya adını korumalı')
+})
