@@ -435,6 +435,39 @@ function Dashboard({ station, control, setView, mic, audioRef, monitorReady, loc
 
 // Yönetici kodunu YALNIZCA kafenin kendi bilgisayarında gösterir — sunucu bu ucu
 // localhost dışına kapatıyor. Kod telefonlara indirilen dosyada bulunmuyor.
+// İstasyon Günlüğü. The station already records everything worth knowing — a file it cannot
+// read, a track it had to skip, an ezan pause it cancelled, an engine that restarted itself —
+// and until now it showed none of it. The operator's only signal was the music itself, which
+// makes every failure look identical: something is wrong and there is no way to find out what.
+//
+// System entries are what matter here, so they are the default view; the music/ad log is
+// available behind a toggle for "what has been playing".
+function HistoryCard({ station }) {
+  const [onlyIssues, setOnlyIssues] = useState(true)
+  const entries = station.history || []
+  const shown = (onlyIssues ? entries.filter(e => e.type === 'system' || e.type === 'microphone') : entries).slice(0, 25)
+  const clock = at => {
+    try { const d = new Date(at); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
+    catch { return '' }
+  }
+  return <section className="card history-card">
+    <div className="card-title">
+      <h2>İstasyon Günlüğü</h2>
+      <button className="outline" onClick={() => setOnlyIssues(v => !v)}>
+        {onlyIssues ? 'Tümü' : 'Sadece olaylar'}
+      </button>
+    </div>
+    {shown.length
+      ? <div className="history-list">
+          {shown.map(entry => <div key={entry.id} className={'history-row ' + entry.type}>
+            <span className="history-time">{clock(entry.at)}</span>
+            <span className="history-text">{entry.title}</span>
+          </div>)}
+        </div>
+      : <p className="muted">{onlyIssues ? 'Kayda değer bir olay yok — her şey yolunda.' : 'Henüz kayıt yok.'}</p>}
+  </section>
+}
+
 // Güncelleme kartı. The café PC is far away, so this button is how a fix actually gets there.
 // It never installs on its own: applying an update stops the music and raises a Windows
 // permission prompt, so the person standing in the café picks the moment.
@@ -604,7 +637,7 @@ function Admin() {
       catch (err) { micRef.current = null; const msg = String(err?.message || err).slice(0, 140); alert('Mikrofona erişilemedi: ' + msg + '\n(Yönetim panelini bilgisayarda/Electron üzerinde açın; tarayıcıda mikrofon için 127.0.0.1 veya HTTPS gerekir.)') }
     }
   }
-  return <main className="admin-shell"><audio ref={audio} preload="none" src="/live.mp3" onPlaying={() => setMonitorReady(true)} onWaiting={() => setMonitorReady(false)} onStalled={() => { setMonitorReady(false); scheduleReconnect() }} onError={scheduleReconnect} onPause={() => setMonitorReady(false)} onEnded={() => { setMonitorReady(false); scheduleReconnect() }}/><header><div className="brand"><div className="brand-mark">R</div><div><h1 className="brand-title">Rovli Radio</h1><span>Rovli Coffee Müzik ve Anons Sistemi</span></div></div><div className="network"><i></i><span>{station.network.ip}:8090</span><small>Yerel ağ yayını</small></div></header><div className="dashboard"><aside className="sidebar"><nav aria-label="Bölümler"><button className={'nav ' + (view === 'home' ? 'active' : '')} onClick={() => setView('home')}>Genel Bakış</button><button className={'nav ' + (view === 'music' ? 'active' : '')} onClick={() => setView('music')}>Müzik Kütüphanesi</button><button className={'nav ' + (view === 'ad' ? 'active' : '')} onClick={() => setView('ad')}>Reklamlar</button></nav><div className="sidebar-foot"><span>Dinleyici</span><strong>{station.listeners} kişi</strong></div></aside><div className="content">{view === 'home' ? <Dashboard station={station} control={control} setView={setView} mic={toggleMic} audioRef={audio} monitorReady={monitorReady} localVol={localVol} onLocalVol={changeLocalVol}/> : <Library station={station} kind={view}/>}</div><aside className="rightbar"><ConnectCard station={station}/><AdminCodeCard/><UpdateCard/><section className="card notices"><h2>Yayın Durumu</h2><p className="ok">{station.capabilities.message}</p><p className="muted">Hedef gecikme: yaklaşık {station.timing.targetLatencySeconds} sn</p><p className="muted">Telefonlar aynı Wi‑Fi ağında olmalıdır.</p></section></aside></div></main>
+  return <main className="admin-shell"><audio ref={audio} preload="none" src="/live.mp3" onPlaying={() => setMonitorReady(true)} onWaiting={() => setMonitorReady(false)} onStalled={() => { setMonitorReady(false); scheduleReconnect() }} onError={scheduleReconnect} onPause={() => setMonitorReady(false)} onEnded={() => { setMonitorReady(false); scheduleReconnect() }}/><header><div className="brand"><div className="brand-mark">R</div><div><h1 className="brand-title">Rovli Radio</h1><span>Rovli Coffee Müzik ve Anons Sistemi</span></div></div><div className="network"><i></i><span>{station.network.ip}:8090</span><small>Yerel ağ yayını</small></div></header><div className="dashboard"><aside className="sidebar"><nav aria-label="Bölümler"><button className={'nav ' + (view === 'home' ? 'active' : '')} onClick={() => setView('home')}>Genel Bakış</button><button className={'nav ' + (view === 'music' ? 'active' : '')} onClick={() => setView('music')}>Müzik Kütüphanesi</button><button className={'nav ' + (view === 'ad' ? 'active' : '')} onClick={() => setView('ad')}>Reklamlar</button></nav><div className="sidebar-foot"><span>Dinleyici</span><strong>{station.listeners} kişi</strong></div></aside><div className="content">{view === 'home' ? <Dashboard station={station} control={control} setView={setView} mic={toggleMic} audioRef={audio} monitorReady={monitorReady} localVol={localVol} onLocalVol={changeLocalVol}/> : <Library station={station} kind={view}/>}</div><aside className="rightbar"><ConnectCard station={station}/><AdminCodeCard/><UpdateCard/><HistoryCard station={station}/><section className="card notices"><h2>Yayın Durumu</h2><p className="ok">{station.capabilities.message}</p><p className="muted">Hedef gecikme: yaklaşık {station.timing.targetLatencySeconds} sn</p><p className="muted">Telefonlar aynı Wi‑Fi ağında olmalıdır.</p></section></aside></div></main>
 }
 
 function Listener() {
@@ -739,4 +772,4 @@ if (rootElement) {
 
 // Exported for the tests. Nothing in the app imports this file — it is the entry point — so
 // these exports cost the bundle nothing and keep the components reachable.
-export { Admin, Listener, ConnectCard, UpdateCard, AdminCodeCard, EzanCard, Player, Progress, Status, TrackList, MasterBar, ErrorBoundary, IS_IOS, adminHeaders }
+export { Admin, Listener, ConnectCard, UpdateCard, HistoryCard, AdminCodeCard, EzanCard, Player, Progress, Status, TrackList, MasterBar, ErrorBoundary, IS_IOS, adminHeaders }

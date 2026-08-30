@@ -285,6 +285,18 @@ header button:focus-visible,.nav:focus-visible{outline-color:var(--brand-gold)}
 /* Ekran okuyucu için görünmez başlık + header başlığı */
 .visually-hidden{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .brand-title{font-family:var(--font-display);color:var(--text-on-dark);font-size:inherit;font-weight:700;margin:0}
+/* İstasyon günlüğü — olanların görünür olduğu tek yer */
+.history-card{margin-top:14px;padding:16px 18px}
+.history-list{margin-top:10px;max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+.history-row{display:flex;gap:10px;align-items:baseline;padding:6px 8px;border-radius:var(--radius-sm);font-size:12px;line-height:1.45}
+.history-row:nth-child(odd){background:var(--background-muted)}
+.history-time{color:var(--text-secondary);font-variant-numeric:tabular-nums;flex-shrink:0}
+.history-text{color:var(--text-primary);word-break:break-word}
+/* Sistem olaylari dikkat cekmeli: operatorun aradigi sey bunlar */
+.history-row.system{border-left:3px solid var(--brand-primary)}
+.history-row.system .history-text{color:var(--brand-primary)}
+.history-row.microphone{border-left:3px solid var(--brand-teal)}
+.history-row.ad .history-text{color:var(--text-secondary)}
 /* Program sürümü / güncelleme kartı */
 .update-card{margin-top:14px;padding:18px 20px}
 .update-card .card-title span{font-variant-numeric:tabular-nums;color:var(--text-secondary);font-size:12px}
