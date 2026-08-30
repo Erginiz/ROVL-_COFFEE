@@ -337,6 +337,22 @@ function Player({ station, control, save, audioRef, monitorReady, localVol, onLo
   </section>
 }
 
+// Sırada. The upcoming order was already being computed and sent on every update, and nothing
+// displayed it. Showing it costs nothing and answers a question the operator asks constantly
+// — is the next song right for the room? — early enough to do something about it.
+function UpNext({ station }) {
+  const queue = (station.nextMusic || []).slice(0, 5)
+  if (!queue.length) return null
+  return <section className="card up-next">
+    <div className="card-title"><h2>Sırada</h2><span>{station.nextMusic.length}</span></div>
+    <div className="up-next-list">
+      {queue.map((track, index) => <span key={track.id} className="up-next-item">
+        <b>{index + 1}</b> {track.title}
+      </span>)}
+    </div>
+  </section>
+}
+
 function TrackList({ title, items, currentId, playing, onPlay }) {
   return <section className="card list-card">
     <div className="card-title"><h2>{title}</h2><span>{items.length}</span></div>
@@ -430,7 +446,7 @@ function Dashboard({ station, control, setView, mic, audioRef, monitorReady, loc
   useEffect(() => { setMusicUnderMic(100 - Number(station.microphone?.ducking ?? 35)) }, [station.microphone?.ducking])
   const duckTimer = useRef()
   const onMusicUnderMic = v => { setMusicUnderMic(v); clearTimeout(duckTimer.current); duckTimer.current = setTimeout(() => save({ microphone: { ducking: 100 - v } }), 150) }
-  return <><EzanBanner station={station}/><Player station={station} control={control} save={save} audioRef={audioRef} monitorReady={monitorReady} localVol={localVol} onLocalVol={onLocalVol}/><MasterBar station={station} control={control}/><section className="cards-row"><section className="card ad-settings"><div className="card-title"><h2>Reklam Otomasyonu</h2><button className="outline" onClick={() => control('manualAd')}>Şimdi Reklam Çal</button></div><label className="switch-row"><input type="checkbox" checked={ads.songsEnabled} onChange={e => save({ adSettings: { songsEnabled: e.target.checked, ...(e.target.checked ? { timedEnabled: false } : {}) } })}/> Her <input className="number" type="number" min="1" aria-label="Kaç şarkıda bir reklam" value={ads.songsEvery} onChange={e => save({ adSettings: { songsEvery: Number(e.target.value) } })}/> şarkıda bir</label><label className="switch-row"><input type="checkbox" checked={ads.timedEnabled} onChange={e => save({ adSettings: { timedEnabled: e.target.checked, ...(e.target.checked ? { songsEnabled: false } : {}) } })}/> Her <input className="number" type="number" min="1" aria-label="Kaç dakikada bir reklam" value={ads.timedMinutes} onChange={e => save({ adSettings: { timedMinutes: Number(e.target.value) } })}/> dakikada bir</label></section><section className="card mic-card"><div className="card-title"><h2>Canlı Anons</h2><span>{station.microphone?.enabled ? 'Açık' : 'Hazır'}</span></div><label className="volume">Anonsta müzik <input type="range" min="0" max="100" value={musicUnderMic} onChange={e => onMusicUnderMic(Number(e.target.value))}/><b>{musicUnderMic}%</b></label><p className="muted">Bu ayar tüm cihazlarda (telefon + bilgisayar) geçerlidir.</p><button className="primary wide" onClick={() => mic?.()}>{station.microphone?.enabled ? 'Anonsu Bitir' : 'Mikrofonla Anons Yap'}</button></section></section><EzanCard station={station} save={save}/><section className="cards-row"><TrackList title="Müzikler" items={station.music} currentId={station.playback.currentId} playing={station.playback.status === 'playing'} onPlay={id => control('playTrack', id)}/><TrackList title="Reklamlar" items={station.ads} currentId={station.playback.currentId} playing={station.playback.status === 'playing'} onPlay={id => control('playTrack', id)}/></section><div className="library-tabs"><button onClick={() => setView('music')}>Müzik Kütüphanesini Aç</button><button onClick={() => setView('ad')}>Reklamları Aç</button></div></>
+  return <><EzanBanner station={station}/><Player station={station} control={control} save={save} audioRef={audioRef} monitorReady={monitorReady} localVol={localVol} onLocalVol={onLocalVol}/><MasterBar station={station} control={control}/><UpNext station={station}/><section className="cards-row"><section className="card ad-settings"><div className="card-title"><h2>Reklam Otomasyonu</h2><button className="outline" onClick={() => control('manualAd')}>Şimdi Reklam Çal</button></div><label className="switch-row"><input type="checkbox" checked={ads.songsEnabled} onChange={e => save({ adSettings: { songsEnabled: e.target.checked, ...(e.target.checked ? { timedEnabled: false } : {}) } })}/> Her <input className="number" type="number" min="1" aria-label="Kaç şarkıda bir reklam" value={ads.songsEvery} onChange={e => save({ adSettings: { songsEvery: Number(e.target.value) } })}/> şarkıda bir</label><label className="switch-row"><input type="checkbox" checked={ads.timedEnabled} onChange={e => save({ adSettings: { timedEnabled: e.target.checked, ...(e.target.checked ? { songsEnabled: false } : {}) } })}/> Her <input className="number" type="number" min="1" aria-label="Kaç dakikada bir reklam" value={ads.timedMinutes} onChange={e => save({ adSettings: { timedMinutes: Number(e.target.value) } })}/> dakikada bir</label></section><section className="card mic-card"><div className="card-title"><h2>Canlı Anons</h2><span>{station.microphone?.enabled ? 'Açık' : 'Hazır'}</span></div><label className="volume">Anonsta müzik <input type="range" min="0" max="100" value={musicUnderMic} onChange={e => onMusicUnderMic(Number(e.target.value))}/><b>{musicUnderMic}%</b></label><p className="muted">Bu ayar tüm cihazlarda (telefon + bilgisayar) geçerlidir.</p><button className="primary wide" onClick={() => mic?.()}>{station.microphone?.enabled ? 'Anonsu Bitir' : 'Mikrofonla Anons Yap'}</button></section></section><EzanCard station={station} save={save}/><section className="cards-row"><TrackList title="Müzikler" items={station.music} currentId={station.playback.currentId} playing={station.playback.status === 'playing'} onPlay={id => control('playTrack', id)}/><TrackList title="Reklamlar" items={station.ads} currentId={station.playback.currentId} playing={station.playback.status === 'playing'} onPlay={id => control('playTrack', id)}/></section><div className="library-tabs"><button onClick={() => setView('music')}>Müzik Kütüphanesini Aç</button><button onClick={() => setView('ad')}>Reklamları Aç</button></div></>
 }
 
 // Yönetici kodunu YALNIZCA kafenin kendi bilgisayarında gösterir — sunucu bu ucu
@@ -772,4 +788,4 @@ if (rootElement) {
 
 // Exported for the tests. Nothing in the app imports this file — it is the entry point — so
 // these exports cost the bundle nothing and keep the components reachable.
-export { Admin, Listener, ConnectCard, UpdateCard, HistoryCard, AdminCodeCard, EzanCard, Player, Progress, Status, TrackList, MasterBar, ErrorBoundary, IS_IOS, adminHeaders }
+export { Admin, Listener, ConnectCard, UpdateCard, HistoryCard, UpNext, AdminCodeCard, EzanCard, Player, Progress, Status, TrackList, MasterBar, ErrorBoundary, IS_IOS, adminHeaders }

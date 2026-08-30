@@ -214,8 +214,13 @@ function publicState() {
     ? [...state.music, ...state.ads].find(item => item.id === state.playback.currentId) || null
     : null
   const nextMusic = state.queues.music.slice(0, 10).map(id => state.music.find(item => item.id === id)).filter(Boolean)
+  // `playedStack` is how the "previous" button steps back — purely internal, and nothing on
+  // any client reads it. It was still being serialised and pushed to every phone on every
+  // change: 50 entries of dead weight in a payload that goes out over the same Wi-Fi the
+  // music is streaming on.
+  const { playedStack, ...shared } = state
   return {
-    ...state,
+    ...shared,
     current,
     nextMusic,
     listeners: listeners.size,

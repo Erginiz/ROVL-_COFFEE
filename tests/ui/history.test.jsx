@@ -8,7 +8,7 @@
 
 import { describe, test, expect, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
-import { HistoryCard } from '../../src/main.jsx'
+import { HistoryCard, UpNext } from '../../src/main.jsx'
 
 const entry = (type, title, minutesAgo = 0) => ({
   id: `${type}-${title}-${minutesAgo}`,
@@ -92,5 +92,37 @@ describe('İstasyon günlüğü', () => {
     const rows = container.querySelectorAll('.history-row')
     expect(rows.length).toBeLessThanOrEqual(25)
     expect(rows[0].textContent).toContain('Olay 0')
+  })
+})
+
+describe('Sırada listesi', () => {
+  test('gelecek parçalar sırayla gösterilir', () => {
+    // The data was already being computed and sent on every update and nothing displayed it.
+    // Showing it answers a question the operator asks constantly — is the next song right for
+    // the room? — while there is still time to change it.
+    render(<UpNext station={{ nextMusic: [
+      { id: 'a', title: 'İlk Şarkı' },
+      { id: 'b', title: 'İkinci Şarkı' },
+      { id: 'c', title: 'Üçüncü Şarkı' }
+    ] }} />)
+    expect(screen.getByText(/İlk Şarkı/)).toBeDefined()
+    expect(screen.getByText(/Üçüncü Şarkı/)).toBeDefined()
+  })
+
+  test('en fazla beş parça gösterilir (panel dolmasın)', () => {
+    const many = Array.from({ length: 10 }, (_, i) => ({ id: 'x' + i, title: 'Şarkı ' + i }))
+    const { container } = render(<UpNext station={{ nextMusic: many }} />)
+    expect(container.querySelectorAll('.up-next-item').length).toBe(5)
+  })
+
+  test('kuyruk boşken kart hiç gösterilmez', () => {
+    // An empty "up next" box is noise on a panel the operator scans at a glance.
+    const { container } = render(<UpNext station={{ nextMusic: [] }} />)
+    expect(container.querySelector('.up-next')).toBeNull()
+  })
+
+  test('kuyruk bilgisi hiç yoksa çökmez', () => {
+    const { container } = render(<UpNext station={{}} />)
+    expect(container.querySelector('.up-next')).toBeNull()
   })
 })
