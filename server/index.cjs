@@ -487,6 +487,8 @@ function setCurrent(id, type, pushHistory = true) {
   const item = [...state.music, ...state.ads].find(track => track.id === id)
   if (item) log(type, `${type === 'ad' ? 'Reklam' : 'Müzik'}: ${item.title}`)
 }
+// Whether the "nothing to play" notice has already been written for the current episode.
+let nothingToPlayReported = false
 function advance({ manualAd = false } = {}) {
   // Never let the "every N songs" rule reach zero here, whatever is in the settings: the
   // counter resets to 0 after each ad, so `tracksSinceAd >= 0` would schedule another ad
@@ -505,8 +507,22 @@ function advance({ manualAd = false } = {}) {
     }
   }
   const id = selectNextMusic()
-  if (id) setCurrent(id, 'music')
-  else setCurrent(null, null)
+  if (id) { nothingToPlayReported = false; setCurrent(id, 'music'); return }
+  // Nothing playable. Pressing Play on a fresh install answered 200, left the station
+  // stopped and wrote nothing anywhere — a button that reports success and does nothing,
+  // which is the first thing anyone tries. Say which of the two it is, because the fix is
+  // different: an empty folder needs music, a full one that yields nothing needs a look at
+  // the files themselves.
+  //
+  // Once per episode: an operator who does not understand will press it again, and five
+  // presses must not cost five identical lines in a log that holds a hundred.
+  if (!nothingToPlayReported) {
+    nothingToPlayReported = true
+    log('system', state.music.length
+      ? 'Çalınabilir parça bulunamadı — müzik dosyaları okunamıyor olabilir'
+      : 'Müzik klasörü boş — çalmak için önce şarkı ekleyin')
+  }
+  setCurrent(null, null)
 }
 function finishCurrent() {
   if (state.playback.currentType === 'music') state.playback.tracksSinceAd += 1

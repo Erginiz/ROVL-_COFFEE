@@ -227,3 +227,69 @@ test('karıştırma değişimi çalan şarkıyı kesmez', async t => {
   assert.equal(state.playback.status, 'playing')
   assert.ok(!state.queues.music.includes(playing), 'çalan parça hemen tekrar kuyruğa girmemeli')
 })
+
+// The very first thing anyone does with a fresh install is press Play. With no music in the
+// folder yet, the button answered 200, the station stayed stopped, the history stayed empty
+// and the status card stayed green — the operator is left pressing a button that reports
+// success and does nothing, with no idea that the folder is what is missing.
+test('boş kütüphanede çalma denemesi sebebiyle birlikte bildirilir', async t => {
+  const server = await startServer({ music: [] })
+  t.after(() => server.stop())
+
+  const response = await server.api('/api/control', 'POST', { action: 'play' })
+  assert.equal(response.status, 200, 'istek hata döndürmemeli — bu bir kullanıcı hatası değil')
+  await sleep(1500)
+
+  const state = await server.state()
+  assert.equal(state.playback.status, 'stopped', 'çalacak bir şey yokken çalıyor görünmemeli')
+  const told = (state.history || []).some(entry => /müzik|parça|klasör/i.test(entry.title || ''))
+  assert.ok(told, `sebep günlüğe yazılmalı, gelen: ${JSON.stringify((state.history || []).slice(0, 3))}`)
+})
+
+test('aynı sebep tekrar tekrar günlüğe yazılmaz', async t => {
+  // An operator who does not understand why will press it again. Five presses must not cost
+  // five identical lines in a log that only holds a hundred.
+  const server = await startServer({ music: [] })
+  t.after(() => server.stop())
+
+  for (let i = 0; i < 5; i++) { await server.api('/api/control', 'POST', { action: 'play' }); await sleep(300) }
+  await sleep(1000)
+
+  const notices = (await server.state()).history.filter(entry => /müzik|parça|klasör/i.test(entry.title || ''))
+  assert.ok(notices.length <= 2, `${notices.length} kez yazılmış — günlüğü dolduruyor`)
+})
+
+test('müzik eklenince çalma yeniden denenebilir', async t => {
+  // The notice must not latch: once the folder has music, pressing Play has to work, and the
+  // next empty-library episode has to be reported again.
+  const server = await startServer({ music: [] })
+  t.after(() => server.stop())
+
+  await server.api('/api/control', 'POST', { action: 'play' })
+  await sleep(800)
+
+  const source = makeTone(6, 440)
+  fs.copyFileSync(source, path.join(server.dataDir, 'Music', 'sonradan.mp3'))
+  await server.api('/api/rescan', 'POST')
+  await server.api('/api/control', 'POST', { action: 'play' })
+
+  await waitFor(async () => (await server.state()).playback.status === 'playing',
+    { timeoutMs: 15000, label: 'müzik eklenince çalmalı' })
+
+  // And the notice must re-arm. If the library empties again — a folder on a drive that
+  // dropped off, or files moved out — the operator has to be told a second time, not left
+  // with a station that goes quiet having already "said it once" hours ago.
+  // `klasör[üu]?`, not `klasör boş`: the message reads "Müzik klasörü boş", and Turkish
+  // suffixes sit between the words a naive pattern expects to be adjacent. The same trap
+  // (`yedek` vs `yedeği`) already cost one debugging round in this suite.
+  const countNotices = async () =>
+    (await server.state()).history.filter(entry => /klasör[üu]? boş|bulunamadı/i.test(entry.title || '')).length
+  const before = await countNotices()
+
+  fs.rmSync(path.join(server.dataDir, 'Music', 'sonradan.mp3'), { force: true })
+  await server.api('/api/rescan', 'POST')
+  await server.api('/api/control', 'POST', { action: 'play' })
+  await sleep(1500)
+
+  assert.ok(await countNotices() > before, 'kütüphane yeniden boşalınca tekrar bildirilmeli')
+})
