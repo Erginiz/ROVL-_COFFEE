@@ -71,3 +71,9 @@ Düğmeye basınca uyarı çıkar: yayın birkaç dakika kesilecek, Windows izin
   güncelleme başlatılamaz — masada unutulmuş bir telefon yayını kapatamasın diye.
 - **Ağ yoksa hiçbir şey bozulmaz:** güncelleme kontrolü başarısız olur, panel sebebini yazar,
   müzik çalmaya devam eder.
+- **Henüz hiç release yayınlanmadıysa** panel `Program güncel.` der, hata göstermez. GitHub bu
+  durumda 404 döndürüyor ve electron-updater onu diğer hatalar gibi bildiriyordu; kusursuz
+  çalışan her kafe bilgisayarında kalıcı bir sarı satır demekti. Boş yere alarm veren panel
+  yok sayılır, sonra önemli olan satır da onunla yok sayılır. Gerçek arızalar (ağa
+  ulaşamama, sertifika, hız sınırı) olduğu gibi gösterilmeye devam ediyor — bkz.
+  `server/update-error.cjs`.
