@@ -82,12 +82,24 @@ doğrudan indirip çalıştırır; deponun elinizde olmasını gerektiren
 `-File scripts/ag-teshis.ps1` biçimi orada işe yaramaz. (Depoyu klonladıysanız o da
 çalışır: `powershell -ExecutionPolicy Bypass -File scripts/ag-teshis.ps1`.)
 
-Adresleri, uygulamanın gördüğü durumu, **telefonların gerçekten hangi adresten
-ulaştığını** ve şu üçünü ayırt eden bir hüküm verir: güvenlik duvarı izni hiç yok mu,
-izin var ama bu ağı kapsamıyor mu, yoksa portu iki program birden mi dinliyor.
-Üçünün çözümü farklıdır ve çıktı hangisi olduğunu söyler.
+Onbeş bölümde topladığı bilgiden (adaptörler, IP/ağ geçidi/DNS, varsayılan rotalar, Wi-Fi,
+sanal ve VPN adaptörleri, ağ profilleri, güvenlik duvarı, üçüncü parti güvenlik yazılımı,
+süreçler, portlar, her adreste erişim testi, uygulamanın kendi durumu ve arıza günlüğü,
+ağda görünen cihazlar, proxy/hosts) **sıralı bir "muhtemel sebep" listesi** çıkarır.
+Ayırt ettikleri arasında: güvenlik duvarı izni hiç yok mu, izin var ama bu ağı kapsamıyor
+mu, portu iki program birden mi dinliyor, bilgisayar iki ağa birden mi bağlı, telefonlar bu
+ağda hiç görünüyor mu. Her birinin çözümü farklıdır ve çıktı hangisi olduğunu söyler.
 
-Hiçbir ayarı değiştirmez; sadece okur ve yazdırır.
+Hepsi elenirse geriye kalanı da söyler — misafir ağı ya da router'daki istemci izolasyonu.
+
+**Bulduğu sorunu düzeltebilir**, ama hiçbir şeyi size sormadan yapmaz: çalıştıracağı komutu
+gösterir, tek tek onayınızı alır (Enter'a basmak "hayır" demektir) ve yaptığı her değişikliği
+raporun sonuna yazar. Düzeltme için yönetici hakkı gerekir; olmadan da teşhisin tamamı çıkar.
+
+Tam rapor masaüstüne `rovli-ag-raporu-<tarih>.txt` olarak kaydedilir — ekrandan kopyalamanıza
+gerek yok, o dosyayı gönderin yeter.
+
+Betiğin kendi karar mantığının testleri var: `ag-teshis.ps1 -Test`.
 
 ## Yapı
 
