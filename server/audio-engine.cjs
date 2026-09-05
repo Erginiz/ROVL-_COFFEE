@@ -41,8 +41,11 @@ const CEIL_RANGE = 32767 * LIMIT_CEILING - KNEE    // output span above the knee
 // Keep 2–8 s of decoded audio buffered ahead: smooth playback, bounded memory.
 const DECODE_HIGH = 1.5 * 1024 * 1024
 const DECODE_LOW = 384 * 1024
-// Drop the live-mic backlog if the mixer ever falls behind, so it can't grow RAM.
-const MAX_MIC_BUFFER = 512 * 1024
+// Both sides of the resampler are bounded. The output retains at most half a second;
+// the input ceiling also protects against a live process which has stopped reading stdin.
+const MAX_MIC_BUFFER = CHUNK * 25
+const MAX_MIC_INPUT_BYTES = 128 * 1024
+const MIC_FINISH_TIMEOUT_MS = 2500
 // Slow/stuck clients that buffer more than this are dropped so one bad connection
 // can never stall the encoder or grow memory without bound.
 //
@@ -160,17 +163,21 @@ class StreamHub {
 }
 
 class AudioEngine {
-  constructor({ mediaRoots, getState, onTrackEnded, onTrackFailed, onError }) {
+  constructor({ mediaRoots, getState, onTrackEnded, onTrackFailed, onError, onEvent, onMicStopped, spawnProcess = spawn }) {
     this.mediaRoots = mediaRoots
     this.getState = getState
     this.onTrackEnded = onTrackEnded
     this.onTrackFailed = onTrackFailed
     this.onError = onError
+    this.onEvent = onEvent
+    this.onMicStopped = onMicStopped
+    this.spawnProcess = spawnProcess
     this.hub = new StreamHub()
 
     this.encoder = null            // persistent MP3 encoder (never dies while running)
     this.shuttingDown = false
     this.pumping = false           // re-entrancy guard for the feed loop
+    this.pumpTimer = null
 
     // Loudness-normalisation gain for the track on air, as a linear multiplier. Cached
     // when the decoder starts rather than looked up per chunk: buildChunk runs 50×/s and
@@ -189,13 +196,19 @@ class AudioEngine {
     this.micIn = null
     this.micQ = new ByteQueue()
     this.micSampleRate = 48000
+    this.micFinishing = false
+    this.micInputEnded = false
+    this.micFinishTimer = null
 
     // Audio-stall watchdog state: timestamp of the last moment music actually made
     // progress (decoder produced bytes, or a chunk was metered out). checkStall() uses it.
     this.lastAudioProgress = Date.now()
     this.stallTimer = null
     // Last time the encoder actually produced output. Drives checkOutput() below.
-    this.lastEncoderOutputAt = Date.now()
+    this.lastEncoderOutputAt = 0
+    this.encoderStartedAt = 0
+    this.encoderRecycledAt = 0
+    this.encoderLaunches = 0
     // Encoder respawn backoff state: recent restart timestamps + the pending restart timer.
     // A single crash recovers instantly; a tight loop (ffmpeg failing to start) backs off so
     // it can't peg the CPU or flood the log over a long run.
@@ -227,16 +240,17 @@ class AudioEngine {
   //
   // Called on every state broadcast, so it does no work beyond reading two fields.
   health() {
-    const sinceOutputMs = Date.now() - this.lastEncoderOutputAt
+    const sinceOutputMs = this.lastEncoderOutputAt ? Date.now() - this.lastEncoderOutputAt : null
     const encoderRunning = Boolean(this.encoder) && !this.shuttingDown
-    return { encoderRunning, sinceOutputMs, flowing: encoderRunning && sinceOutputMs < OUTPUT_STALL_MS }
+    return { encoderRunning, sinceOutputMs, flowing: encoderRunning && sinceOutputMs !== null && sinceOutputMs < OUTPUT_STALL_MS }
   }
 
   checkOutput() {
     if (this.shuttingDown || !this.encoder || this.encoderRestartTimer) return
-    if (Date.now() - this.lastEncoderOutputAt < OUTPUT_STALL_MS) return
+    const now = Date.now()
+    if (now - Math.max(this.lastEncoderOutputAt, this.encoderStartedAt, this.encoderRecycledAt) < OUTPUT_STALL_MS) return
     this.onError?.('Yayın çıkışı durdu — ses kodlayıcı yenileniyor')
-    this.lastEncoderOutputAt = Date.now()   // one recycle per window, not a kill storm
+    this.encoderRecycledAt = now
     try { this.encoder.kill() } catch {}
   }
   checkStall() {
@@ -247,6 +261,7 @@ class AudioEngine {
     if (pb.status !== 'playing' || !this.decoder || this.decoderEnded) { this.lastAudioProgress = Date.now(); return }
     if (Date.now() - this.lastAudioProgress < STALL_MS) return
     this.onError?.('Ses akışı durdu — parça atlanıyor')
+    this.onEvent?.({ type: 'decoderStall' })
     this.lastAudioProgress = Date.now()
     this.stopDecoder()
     // Same recovery the server uses for an unreadable file: advance and play the next.
@@ -263,14 +278,15 @@ class AudioEngine {
       '-write_xing', '0', '-id3v2_version', '0', '-f', 'mp3', 'pipe:1'
     ]
     try {
-      const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      if (this.encoderLaunches++ > 0) this.onEvent?.({ type: 'encoderRestart' })
+      const child = this.spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       this.encoder = child
-      this.lastEncoderOutputAt = Date.now()   // grace window before checkOutput() judges it
+      this.encoderStartedAt = Date.now()
       child.stdin.on('error', () => {})   // ignore EPIPE on shutdown/respawn
       child.stdout.on('data', chunk => { this.lastEncoderOutputAt = Date.now(); this.hub.push(chunk) })
       child.stderr.on('data', data => this.reportEncoderError(data.toString().trim()))
       child.on('error', error => this.onError?.(error.message))
-      child.on('close', () => {
+      child.on('close', (code, signal) => {
         if (this.encoder === child) {
           this.encoder = null
           // CRITICAL: the pump loop was feeding THIS process and may be parked waiting for a
@@ -282,7 +298,10 @@ class AudioEngine {
           // Self-heal: bring the encoder straight back so the stream keeps flowing (a rare,
           // brief discontinuity for connected clients) — but through a backoff so a start
           // failure that repeats can't become a tight respawn loop over a long run.
-          if (!this.shuttingDown) this.scheduleEncoderRestart()
+          if (!this.shuttingDown) {
+            this.onError?.(`Ses kodlayıcı kapandı (kod: ${code ?? '-'}, sinyal: ${signal || '-'})`)
+            this.scheduleEncoderRestart()
+          }
         }
       })
       this.pump()
@@ -330,6 +349,7 @@ class AudioEngine {
   // real time and back-pressures here, which is what paces the whole broadcast.
   pump() {
     if (this.pumping || !this.encoder) return
+    if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null }
     // Bind this loop to the encoder it is feeding. `pumping` parks the loop until the
     // pipe drains, and a drain belonging to a process that has since died must not be
     // allowed to resume a stale loop (nor may it be waited on forever — see the close
@@ -341,16 +361,30 @@ class AudioEngine {
     let writes = 0
     while (writes < 64) {
       const chunk = this.buildChunk()
-      if (!chunk) break                       // playing but waiting on the decoder
+      if (!chunk) break                       // EOF callback will select the next source
       writes++
       this.maybeResumeDecoder()
       if (!stdin.write(chunk)) {               // pipe full → resume when it drains
         stdin.once('drain', () => {
+          if (this.encoder !== child) return
           this.pumping = false
-          if (this.encoder === child) this.pump()   // stale drain from a dead encoder: ignore
+          this.pump()
         })
         return
       }
+      // An underrun must keep the encoder and microphone alive, but filling its whole
+      // writable capacity with silence would manufacture a gap before the next decoder.
+      if (chunk === SILENCE) {
+        this.pumping = false
+        // Use an accumulated deadline: Windows can wake a 20 ms timer after ~31 ms;
+        // scheduling 20 ms afresh each time would slowly starve an otherwise idle stream.
+        const now = Date.now()
+        this.silenceDueAt = Math.max(this.silenceDueAt || 0, now - 20) + 20
+        this.pumpTimer = setTimeout(() => { this.pumpTimer = null; this.pump() }, Math.max(1, this.silenceDueAt - now))
+        this.pumpTimer.unref?.()
+        return
+      }
+      this.silenceDueAt = 0
     }
     this.pumping = false
     if (writes >= 64) setImmediate(() => this.pump())  // yield to the event loop, continue
@@ -366,11 +400,21 @@ class AudioEngine {
     if (playing) {
       const m = this.musicQ.pull(CHUNK)
       if (m) { music = m; this.lastAudioProgress = Date.now() }   // real audio flowed → not stalled
-      else if (this.decoderEnded) this.handleTrackEnd()   // buffer drained → track over
-      else return null                                    // transient underrun: wait
+      else if (this.decoderEnded && this.musicQ.len) {
+        music = Buffer.alloc(CHUNK)
+        this.musicQ.pull(this.musicQ.len).copy(music)
+      } else if (this.decoderEnded && !this.ended) {
+        this.handleTrackEnd()
+        return null
+      }
     }
     let mic = null
     if (this.micActive && this.micQ.len >= CHUNK) mic = this.micQ.pull(CHUNK)
+    else if (this.micActive && this.micInputEnded && this.micQ.len) {
+      mic = Buffer.alloc(CHUNK)
+      this.micQ.pull(this.micQ.len).copy(mic)
+    }
+    this.maybeFinishMic()
     if (!music && !mic) return SILENCE
     // Music and ads carry independent broadcast levels; pick by what's playing now.
     // `pb.volume` is the legacy single-knob fallback for un-migrated state.
@@ -396,7 +440,7 @@ class AudioEngine {
     if (this.ended) return
     this.ended = true
     const gen = this.generation
-    setImmediate(() => { if (gen === this.generation) this.onTrackEnded?.() })
+    setImmediate(() => { if (gen === this.generation) { this.onTrackEnded?.(); this.pump() } })
   }
 
   maybeResumeDecoder() {
@@ -444,7 +488,7 @@ class AudioEngine {
     let bytes = 0
     this.lastAudioProgress = Date.now()   // give the fresh decoder a full stall window to start
     try {
-      const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = this.spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
       this.decoder = child
       this.ended = false
       this.decoderEnded = false
@@ -462,7 +506,7 @@ class AudioEngine {
       child.on('close', code => {
         if (gen !== this.generation) return
         this.decoderEnded = true
-        if (code !== 0 && bytes < CHUNK * 2) {
+        if (bytes === 0 || (code !== 0 && bytes < CHUNK * 2)) {
           // Produced essentially nothing → corrupt/unreadable file → skip now.
           this.ended = true
           const g = this.generation
@@ -472,7 +516,10 @@ class AudioEngine {
         }
       })
       this.pump()
-    } catch (error) { this.onError?.(error.message) }
+    } catch (error) {
+      this.onError?.(error.message)
+      setImmediate(() => { if (gen === this.generation) this.onTrackFailed?.() })
+    }
   }
 
   // Stop the music source only — the encoder and the /live.mp3 stream stay alive
@@ -489,7 +536,9 @@ class AudioEngine {
       try { child.stdout?.removeAllListeners() } catch {}
       try { child.stderr?.removeAllListeners() } catch {}
       try { child.kill() } catch {}
-      const killTimer = setTimeout(() => { try { if (!child.killed) child.kill('SIGKILL') } catch {} }, 800)
+      const killTimer = setTimeout(() => {
+        try { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') } catch {}
+      }, 800)
       killTimer.unref?.()
       child.once('close', () => clearTimeout(killTimer))
     }
@@ -503,71 +552,125 @@ class AudioEngine {
   startMic() {
     if (this.micActive) return
     this.micActive = true
+    this.micFinishing = false
+    this.micInputEnded = false
     this.startMicResampler()
   }
   startMicResampler() {
     const rate = Math.max(8000, Math.min(96000, Number(this.micSampleRate) || 48000))
-    const args = ['-hide_banner', '-loglevel', 'error', '-f', 's16le', '-ar', String(rate), '-ac', '1', '-i', 'pipe:0', '-f', 's16le', '-ar', String(RATE), '-ac', String(CHANNELS), 'pipe:1']
+    // The input format is already known. FFmpeg's default probing otherwise withholds
+    // about a second of PCM, swallowing short announcements when their sender stops.
+    const args = ['-hide_banner', '-loglevel', 'error', '-f', 's16le', '-ar', String(rate), '-ac', '1', '-probesize', '32', '-analyzeduration', '0', '-i', 'pipe:0', '-f', 's16le', '-ar', String(RATE), '-ac', String(CHANNELS), '-flush_packets', '1', 'pipe:1']
     try {
-      const child = spawn(ffmpegPath, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      const child = this.spawnProcess(ffmpegPath, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
       this.micProc = child
       this.micIn = child.stdin
       child.stdin.on('error', () => {})
       child.stdout.on('data', chunk => {
+        if (this.micProc !== child || !this.micActive) return
         this.micQ.push(chunk)
-        if (this.micQ.len > MAX_MIC_BUFFER) this.micQ.clear()   // fell behind → drop backlog, stay live
+        if (this.micQ.len > MAX_MIC_BUFFER) {
+          const drop = Math.ceil((this.micQ.len - MAX_MIC_BUFFER) / 4) * 4
+          this.micQ.pull(drop)
+          this.onEvent?.({ type: 'micOutputDropped', bytes: drop })
+        }
+        this.pump()
       })
-      child.stderr.on('data', () => {})
+      child.stderr.on('data', data => {
+        if (this.micProc === child) this.onError?.('Mikrofon: ' + data.toString().trim())
+      })
       child.on('error', error => this.onError?.('Mikrofon: ' + error.message))
       child.on('close', () => {
         if (this.micProc !== child) return
         this.micProc = null
         this.micIn = null
-        // If the announcement is still live, the resampler dying would otherwise silence it
-        // for good: micActive stays true, so startMic() short-circuits and writeMic() drops
-        // every chunk without a word. Bring the resampler back instead.
-        if (this.micActive && !this.shuttingDown) {
-          this.onError?.('Mikrofon köprüsü kapandı — yeniden başlatılıyor')
-          setTimeout(() => { if (this.micActive && !this.micProc && !this.shuttingDown) this.startMicResampler() }, 300).unref?.()
+        if (this.micFinishing) {
+          this.micInputEnded = true
+          this.maybeFinishMic()
+          this.pump()
+        } else if (this.micActive && !this.shuttingDown) {
+          // Stop the owning session as well: accepting PCM into a missing resampler
+          // while the panel still says "live" loses speech without notifying its sender.
+          this.onError?.('Mikrofon köprüsü beklenmeden kapandı — anons durduruldu')
+          this.stopMic('process-exit')
         }
       })
-    } catch (error) { this.onError?.(error.message) }
+    } catch (error) { this.onError?.(error.message); this.stopMic('process-error') }
   }
   writeMic(chunk) {
-    if (!this.micActive || !chunk || !chunk.length) return
-    if (this.micIn && this.micIn.writable) { try { this.micIn.write(chunk) } catch {} }
+    if (!this.micActive || this.micFinishing || !chunk || !chunk.length) return false
+    if (!this.micIn?.writable) return false
+    if (this.micIn.writableLength + chunk.length > MAX_MIC_INPUT_BYTES) {
+      this.onError?.('Mikrofon giriş tamponu doldu — anons durduruldu')
+      this.onEvent?.({ type: 'micInputOverflow' })
+      this.stopMic('input-overflow')
+      return false
+    }
+    try {
+      // A false write result still means ACCEPTED. Further chunks are admitted only
+      // while the bounded writableLength above has room; nothing waits without a limit.
+      this.micIn.write(chunk)
+      return true
+    } catch { this.stopMic('input-error'); return false }
   }
-  stopMic() {
+  finishMic() {
+    if (!this.micActive) { this.onMicStopped?.('finished'); return }
+    if (this.micFinishing) return
+    this.micFinishing = true
+    this.micFinishTimer = setTimeout(() => {
+      this.onError?.('Mikrofon son sesi zamanında boşaltamadı — anons durduruldu')
+      this.stopMic('finish-timeout')
+    }, MIC_FINISH_TIMEOUT_MS)
+    this.micFinishTimer.unref?.()
+    try { this.micIn?.end() } catch { this.stopMic('input-error') }
+    if (!this.micProc) { this.micInputEnded = true; this.maybeFinishMic() }
+  }
+  maybeFinishMic() {
+    if (this.micFinishing && this.micInputEnded && !this.micQ.len) this.stopMic('finished')
+  }
+  stopMic(reason = 'stopped') {
+    if (this.micFinishTimer) { clearTimeout(this.micFinishTimer); this.micFinishTimer = null }
     if (!this.micActive) return
     this.micActive = false
+    this.micFinishing = false
+    this.micInputEnded = false
     const child = this.micProc
     try { this.micIn?.end() } catch {}
     try { child?.kill() } catch {}
     // Same SIGKILL backstop the decoder and encoder get: a resampler that ignores the polite
     // kill must not survive as an orphan ffmpeg holding the mic pipe open.
     if (child) {
-      const t = setTimeout(() => { try { if (!child.killed) child.kill('SIGKILL') } catch {} }, 800)
+      const t = setTimeout(() => { try { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') } catch {} }, 800)
       t.unref?.()
       child.once('close', () => clearTimeout(t))
     }
     this.micProc = null
     this.micIn = null
     this.micQ.clear()
+    this.onMicStopped?.(reason)
   }
 
   shutdown() {
     this.shuttingDown = true
+    if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null }
     if (this.stallTimer) { clearInterval(this.stallTimer); this.stallTimer = null }
     if (this.encoderRestartTimer) { clearTimeout(this.encoderRestartTimer); this.encoderRestartTimer = null }
     this.stopMic()
     this.stopDecoder()
     const enc = this.encoder
     this.encoder = null
-    if (enc) { try { enc.stdin?.end() } catch {} try { enc.kill() } catch {} const t = setTimeout(() => { try { if (!enc.killed) enc.kill('SIGKILL') } catch {} }, 800); t.unref?.() }
+    if (enc) {
+      try { enc.stdin?.end() } catch {}
+      try { enc.kill() } catch {}
+      const t = setTimeout(() => {
+        try { if (enc.exitCode === null && enc.signalCode === null) enc.kill('SIGKILL') } catch {}
+      }, 800)
+      t.unref?.()
+    }
     this.hub.close()
   }
 }
 
 // ByteQueue and softLimit are exported for the unit tests: both are pure, and reaching
 // them through a live AudioEngine would mean spawning ffmpeg to check arithmetic.
-module.exports = { AudioEngine, StreamHub, MAX_CLIENT_BACKLOG, ByteQueue, softLimit, mixChunk, CHUNK, MIC_GAIN, LIMIT_KNEE, LIMIT_CEILING }
+module.exports = { AudioEngine, StreamHub, MAX_CLIENT_BACKLOG, MAX_MIC_BUFFER, MAX_MIC_INPUT_BYTES, ByteQueue, softLimit, mixChunk, CHUNK, MIC_GAIN, LIMIT_KNEE, LIMIT_CEILING }

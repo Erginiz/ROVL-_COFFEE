@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog } = require('electron')
+const { app, BrowserWindow, Menu, dialog, Tray, nativeImage } = require('electron')
 const path = require('path')
 const { classifyUpdateError } = require('../server/update-error.cjs')
 
@@ -28,6 +28,12 @@ const updateState = {
   checkedAt: null
 }
 let autoUpdater = null
+function recordUpdateError(error) {
+  updateState.checking = false
+  updateState.downloading = false
+  Object.assign(updateState, classifyUpdateError(error))
+  updateState.checkedAt = new Date().toISOString()
+}
 function setupUpdater() {
   try {
     ({ autoUpdater } = require('electron-updater'))
@@ -40,10 +46,12 @@ function setupUpdater() {
   }
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = false   // the operator decides when the music stops
-  autoUpdater.on('checking-for-update', () => { updateState.checking = true; updateState.error = null })
+  autoUpdater.on('checking-for-update', () => { updateState.checking = true; updateState.error = null; updateState.noReleaseYet = false })
   autoUpdater.on('update-available', info => {
     updateState.checking = false
     updateState.available = true
+    updateState.noReleaseYet = false
+    updateState.error = null
     updateState.downloading = true
     updateState.newVersion = info?.version || null
   })
@@ -51,6 +59,8 @@ function setupUpdater() {
     updateState.checking = false
     updateState.available = false
     updateState.downloading = false
+    updateState.noReleaseYet = false
+    updateState.error = null
     updateState.checkedAt = new Date().toISOString()
   })
   autoUpdater.on('download-progress', progress => {
@@ -59,6 +69,7 @@ function setupUpdater() {
   })
   autoUpdater.on('update-downloaded', info => {
     updateState.downloading = false
+    updateState.noReleaseYet = false
     updateState.downloaded = true
     updateState.percent = 100
     updateState.newVersion = info?.version || updateState.newVersion
@@ -67,19 +78,25 @@ function setupUpdater() {
   autoUpdater.on('error', error => {
     // No internet, GitHub unreachable, a malformed release: worth showing, never worth
     // crashing the station over.
-    updateState.checking = false
-    updateState.downloading = false
-    Object.assign(updateState, classifyUpdateError(error))
-    updateState.checkedAt = new Date().toISOString()
+    recordUpdateError(error)
   })
-  const check = () => { try { autoUpdater.checkForUpdates() } catch (error) { Object.assign(updateState, classifyUpdateError(error)) } }
+  const check = () => {
+    try {
+      // electron-updater returns a Promise. Catching only synchronous throws left rejected
+      // checks as unhandled rejections and made a network outage destabilise the desktop app.
+      Promise.resolve(autoUpdater.checkForUpdates()).catch(recordUpdateError)
+    } catch (error) { recordUpdateError(error) }
+  }
   setTimeout(check, 20000)                     // let the station finish booting first
   setInterval(check, 6 * 3600 * 1000).unref?.()
 }
 // Handed to the server so the panel can drive it.
 const updater = {
   status: () => ({ ...updateState, version: app.getVersion() }),
-  check: () => { try { autoUpdater?.checkForUpdates() } catch {} },
+  check: () => {
+    try { Promise.resolve(autoUpdater?.checkForUpdates()).catch(recordUpdateError) }
+    catch (error) { recordUpdateError(error) }
+  },
   install: () => {
     if (!updateState.downloaded) return false
     // isSilent=false so the operator sees the installer; isForceRunAfter=true so the station
@@ -93,6 +110,42 @@ const updater = {
 Menu.setApplicationMenu(null)
 
 let server
+let mainWindow = null
+let tray = null
+let shutdownStarted = false
+let allowWindowClose = false
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function createTray() {
+  if (tray || !Tray) return
+  const candidates = [
+    path.join(process.resourcesPath || '', 'build', 'icon.ico'),
+    path.join(__dirname, '..', 'build', 'icon.ico')
+  ]
+  let icon = nativeImage?.createEmpty?.()
+  for (const candidate of candidates) {
+    try {
+      if (require('fs').existsSync(candidate)) { icon = nativeImage.createFromPath(candidate); break }
+    } catch {}
+  }
+  try {
+    tray = new Tray(icon)
+    tray.setToolTip('Rovli Radyo')
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Paneli Aç', click: showMainWindow },
+      { type: 'separator' },
+      { label: 'Yayını Durdur ve Çık', click: () => { allowWindowClose = true; app.quit() } }
+    ]))
+    tray.on('click', showMainWindow)
+    tray.on('double-click', showMainWindow)
+  } catch (error) { console.error('Bildirim alanı hazırlanamadı:', error.message) }
+}
 
 // Only one instance may run — a second launch would fight over ports 8090/8443.
 // If someone re-opens the app, just focus the existing window instead.
@@ -101,10 +154,11 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', () => {
     const win = BrowserWindow.getAllWindows()[0]
-    if (win) { if (win.isMinimized()) win.restore(); win.focus() }
+    if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus() }
   })
 
   const createWindow = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) { showMainWindow(); return mainWindow }
     const window = new BrowserWindow({
       width: 1360,
       height: 900,
@@ -115,13 +169,27 @@ if (!app.requestSingleInstanceLock()) {
       autoHideMenuBar: true,
       webPreferences: { contextIsolation: true, nodeIntegration: false }
     })
+    mainWindow = window
+    createTray()
+    window.on('close', event => {
+      if (allowWindowClose || shutdownStarted || !tray) return
+      // The X button hides the operator panel but leaves the radio and its listeners alive.
+      // The tray menu is the explicit stop action.
+      event.preventDefault()
+      window.hide()
+    })
+    window.on('closed', () => { if (mainWindow === window) mainWindow = null })
     // Not a literal 8090: the station binds whatever PORT says, and the error dialog below
     // already reads it. Hardcoding it here meant that with PORT set, the panel opened on an
     // address nothing was serving — a blank window with no explanation.
     const address = process.env.CAFE_RADIO_DEV === '1'
       ? 'http://127.0.0.1:5173/admin'
       : `http://127.0.0.1:${process.env.PORT || 8090}/admin`
-    window.loadURL(address)
+    window.loadURL(address).catch(error => {
+      console.error('Yönetim paneli açılamadı:', error.message)
+      try { dialog.showErrorBox('Rovli Radyo paneli açılamadı', error.message) } catch {}
+    })
+    return window
   }
 
   app.whenReady().then(() => {
@@ -137,19 +205,21 @@ if (!app.requestSingleInstanceLock()) {
       // page that never loads, and the phones would get "connection refused" with the café
       // left guessing. The panel itself cannot report this — it is served BY the thing that
       // failed — so say it in the only place left, a dialog.
-      server.once('error', error => {
+      server.once('startup-failed', error => {
         const message = error?.code === 'EADDRINUSE'
           ? `Rovli Radyo zaten çalışıyor olabilir.\n\nPort ${process.env.PORT || 8090} başka bir program tarafından kullanılıyor. ` +
             'Görev Yöneticisi\'nde açık bir "Rovli Radyo" varsa kapatıp yeniden başlatın.'
           : `Rovli Radyo başlatılamadı.\n\n${error?.message || error}`
         try { dialog.showErrorBox('Rovli Radyo başlatılamadı', message) } catch {}
-        createWindow()
+        allowWindowClose = true
+        app.quit()
       })
     }
     app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow())
   })
 
   app.on('window-all-closed', () => {
+    if (tray && !allowWindowClose && !shutdownStarted) return
     if (process.platform !== 'darwin') app.quit()
   })
 
@@ -158,17 +228,18 @@ if (!app.requestSingleInstanceLock()) {
   // none of that — it only stops accepting new connections, and the long-lived audio and
   // event streams never end on their own, so it could not even finish. Everything else was
   // left to the process-exit hook, which is a backstop, not a plan.
-  let quitting = false
   app.on('before-quit', event => {
-    if (quitting || !server?.gracefulShutdown) { try { server?.close() } catch {} ; return }
+    if (shutdownStarted || !server?.gracefulShutdown) { try { server?.close() } catch {} ; return }
     // Hold the quit open just long enough to shut down cleanly, then quit for real. The
     // timeout is the safety net: a station that refuses to close is worse than an untidy one.
     event.preventDefault()
-    quitting = true
+    shutdownStarted = true
     let done = false
-    const finish = () => { if (!done) { done = true; app.quit() } }
+    const finish = () => { if (!done) { done = true; try { tray?.destroy() } catch {}; tray = null; app.quit() } }
     setTimeout(finish, 5000).unref?.()
     try { server.gracefulShutdown() } catch {}
-    setImmediate(finish)
+    // gracefulShutdown flushes state synchronously and asks child processes to exit. Give
+    // those pipes a short turn before quitting; the five-second timer above is the backstop.
+    setTimeout(finish, 100).unref?.()
   })
 }

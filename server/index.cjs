@@ -18,6 +18,7 @@ const { readWindowsNetworkPosture } = require('./firewall-check.cjs')
 const app = express()
 const port = Number(process.env.PORT || 8090)
 const httpsPort = Number(process.env.HTTPS_PORT || 8443)
+const httpsStatus = { port: httpsPort, listening: false, error: null }
 const root = process.env.CAFE_RADIO_DATA || path.join(process.cwd(), 'data')
 const statePath = path.join(root, 'station.json')
 const appRoot = process.resourcesPath
@@ -33,6 +34,8 @@ const mediaRoots = {
   music: path.join(root, 'Music'),
   ad: path.join(root, 'Ads')
 }
+// Uploads stay outside the watched library until their metadata has been read.
+const incomingRoot = path.join(root, '.uploads')
 // Maps a media-folder kind to its state array key, and the audio files we scan for.
 const KIND_KEY = { music: 'music', ad: 'ads' }
 // Always look the folder up through this. A bare `mediaRoots[kind]` with `kind` straight
@@ -66,7 +69,7 @@ const MAX_TIMED_MINUTES = 24 * 60
 // How many times a file that cannot be read is re-probed before the station stops trying.
 const MAX_PROBE_ATTEMPTS = 3
 
-for (const directory of [root, certDir, ...Object.values(mediaRoots)]) fs.mkdirSync(directory, { recursive: true })
+for (const directory of [root, certDir, incomingRoot, ...Object.values(mediaRoots)]) fs.mkdirSync(directory, { recursive: true })
 
 const defaults = {
   // `port` used to be stored here too. Nothing read it — the port the station actually binds
@@ -83,7 +86,7 @@ const defaults = {
   microphone: { enabled: false, ducking: 35 },
   music: [],
   ads: [],
-  queues: { music: [], adCursor: 0 },
+  queues: { music: [], adCursor: 0, musicCycleStarted: false },
   history: [],
   playedStack: [],
   // `prevStatus` remembers what the station was doing before the ezan silenced it. It lives
@@ -108,6 +111,16 @@ function mergeState(saved) {
     } else {
       out[key] = value
     }
+  }
+  // Inspect the saved fields before defaults hide their absence. Otherwise legacy
+  // volume=55 silently becomes the new default of 76 in both channels.
+  const oldPlayback = saved?.playback
+  if (oldPlayback && Number.isFinite(oldPlayback.volume)) {
+    if (oldPlayback.musicVolume == null) out.playback.musicVolume = oldPlayback.volume
+    if (oldPlayback.adVolume == null) out.playback.adVolume = oldPlayback.volume
+  }
+  if (out.queues && saved?.queues?.musicCycleStarted == null) {
+    out.queues.musicCycleStarted = !!(out.queues.music?.length || out.playback?.currentId)
   }
   return out
 }
@@ -156,14 +169,6 @@ function readState() {
   return structuredClone(defaults)
 }
 let state = readState()
-// Migrate old installs: playback used to have one shared `volume`. Split it into
-// independent musicVolume/adVolume, seeded from the old value so existing users
-// don't get a surprise volume jump on first launch after the update.
-if (state.playback.musicVolume == null || state.playback.adVolume == null) {
-  const legacy = Number.isFinite(state.playback.volume) ? state.playback.volume : 76
-  if (state.playback.musicVolume == null) state.playback.musicVolume = legacy
-  if (state.playback.adVolume == null) state.playback.adVolume = legacy
-}
 let listeners = new Map()
 let clients = new Set()
 
@@ -269,10 +274,21 @@ function getLanIp() {
 const reachedVia = new Map()   // local interface ip → last time a phone arrived on it
 const REACHED_TTL_MS = 10 * 60000
 function noteReachedVia(req) {
-  const remote = req.socket?.remoteAddress || ''
-  if (!remote || remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1') return
+  // The PowerShell diagnostic intentionally probes every local interface. Mark those
+  // probes so the tool cannot manufacture its own "phone arrived" evidence. An ordinary
+  // process connecting through the PC's LAN address is otherwise indistinguishable from a
+  // phone at the socket layer (Windows reports the same local IP on both ends), so the
+  // explicit marker is the only honest boundary here.
+  const diagnostic = req.headers?.['x-rovli-diagnostic'] || req.get?.('x-rovli-diagnostic')
+  if (String(diagnostic).toLowerCase() === '1') return
+  const remote = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '')
+  if (!remote || remote.startsWith('127.') || remote === '::1') return
   const local = String(req.socket?.localAddress || '').replace(/^::ffff:/, '')
   if (!local || local === '127.0.0.1') return
+  // A LAN client is evidence even when it happens to be this machine talking to its own
+  // LAN address: Windows presents that connection as the same address at both ends. The
+  // diagnostic marker above is what suppresses the tool's own probe; silently dropping all
+  // equal remote/local pairs would also drop the real phone-path test used by operators.
   reachedVia.set(local, Date.now())
 }
 function reachedViaList() {
@@ -334,7 +350,7 @@ function publicState() {
         // Published because the panel prints these addresses for the operator to read out.
         // It used to write ":8090" as a literal while the server bound whatever PORT said —
         // two sources of truth for the one string a customer types into their phone.
-        port, httpsPort,
+        port, httpsPort, https: { ...httpsStatus },
         // The saved address is gone (adapter unplugged, Wi-Fi dropped, router swapped). The
         // station keeps working on whatever address it does have, but the QR now points
         // somewhere else than the operator chose — which is exactly the situation where
@@ -439,10 +455,14 @@ function buildMusicQueue() {
     for (let i = ids.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [ids[i], ids[j]] = [ids[j], ids[i]] }
   }
   state.queues.music.push(...ids)
+  state.queues.musicCycleStarted = true
 }
 function itemById(id) { return id ? [...state.music, ...state.ads].find(track => track.id === id) || null : null }
 function selectNextMusic() {
-  if (!state.queues.music.length) buildMusicQueue()
+  if (!state.queues.music.length) {
+    if (state.playback.loop === false && state.queues.musicCycleStarted) return null
+    buildMusicQueue()
+  }
   // Skip ids left over for tracks that were deleted, so a stale queue entry
   // can never make the engine try to play a file that no longer exists.
   const takePlayable = () => {
@@ -454,6 +474,7 @@ function selectNextMusic() {
   }
   const fromQueue = takePlayable()
   if (fromQueue) return fromQueue
+  if (state.playback.loop === false) return null
   // Draining the queue found nothing playable — every id in it pointed at a file that has
   // since been removed (a saved queue from a previous session is the usual way this
   // happens). Reporting "no music" here left the station stopped with a folder full of
@@ -506,13 +527,20 @@ function advance({ manualAd = false } = {}) {
     const id = selectNextAd()
     if (id) {
       setCurrent(id, 'ad')
-      state.playback.tracksSinceAd = 0
-      resetTimedAd()
+      if (!manualAd || state.adSettings.manualResetsCounters) {
+        state.playback.tracksSinceAd = 0
+        resetTimedAd()
+      }
       return
     }
   }
   const id = selectNextMusic()
   if (id) { nothingToPlayReported = false; setCurrent(id, 'music'); return }
+  if (state.music.length && state.playback.loop === false && state.queues.musicCycleStarted) {
+    log('system', 'Müzik sırası tamamlandı — tekrar kapalı')
+    setCurrent(null, null)
+    return
+  }
   // Nothing playable. Pressing Play on a fresh install answered 200, left the station
   // stopped and wrote nothing anywhere — a button that reports success and does nothing,
   // which is the first thing anyone tries. Say which of the two it is, because the fix is
@@ -534,6 +562,36 @@ function finishCurrent() {
   advance()
 }
 
+const engineCounters = { encoderRestarts: 0, trackFailures: 0, stallRecoveries: 0, engineErrors: 0, micInputOverflows: 0, micOutputDroppedBytes: 0, lastError: null }
+const MIC_IDLE_MS = 5000
+let micSession = null
+let micIdleTimer = null
+// Microphones are live sessions; a persisted "enabled" flag cannot survive their sender.
+state.microphone = { ...(state.microphone || {}), enabled: false, sessionId: null }
+function clearMicSession() {
+  if (micIdleTimer) { clearTimeout(micIdleTimer); micIdleTimer = null }
+  micSession = null
+  state.microphone.enabled = false
+  state.microphone.sessionId = null
+}
+function touchMicSession() {
+  if (micIdleTimer) clearTimeout(micIdleTimer)
+  const session = micSession
+  micIdleTimer = setTimeout(() => {
+    if (micSession !== session) return
+    clearMicSession()
+    audioEngine.stopMic('idle-timeout')
+    log('microphone', 'Mikrofon bağlantısı kesildi — anons otomatik sonlandırıldı')
+    broadcast()
+  }, MIC_IDLE_MS)
+  micIdleTimer.unref?.()
+}
+const micOwner = req => isLocalRequest(req) ? 'local' : req.get('x-admin-token')
+function matchesMicSession(req, id = req.get('x-mic-session')) {
+  return Boolean(micSession && micSession.owner === micOwner(req) &&
+    (id === micSession.id || (!id && micSession.legacy)))
+}
+
 let consecutiveFailures = 0
 const audioEngine = new AudioEngine({
   mediaRoots,
@@ -547,6 +605,7 @@ const audioEngine = new AudioEngine({
       // The whole library looks unplayable; stop instead of spinning through it.
       consecutiveFailures = 0
       state.playback.status = 'stopped'
+      audioEngine.stop()
       log('system', 'Çalınabilir parça bulunamadı, yayın durduruldu')
       broadcast()
       return
@@ -557,13 +616,24 @@ const audioEngine = new AudioEngine({
   onError: message => {
     if (!message) { broadcast(); return }
     engineCounters.engineErrors += 1
-    // Count the two self-healing events separately: an encoder that keeps respawning, or a
-    // stall that keeps recovering, is the signature of a station in trouble — and the whole
-    // point of the status report is that nobody has to be standing at the PC to notice.
-    const text = String(message)
-    if (/kodlayıcı|encoder/i.test(text)) engineCounters.encoderRestarts += 1
-    if (/durdu|stall/i.test(text)) engineCounters.stallRecoveries += 1
+    // Detailed diagnostics stay in the authenticated report; public history is shared
+    // with every listener and must not expose media paths from FFmpeg stderr.
+    const text = String(message).replace(/[\r\n]+/g, ' ').slice(0, 1000)
+    engineCounters.lastError = { at: new Date().toISOString(), message: text }
+    console.error('[audio]', text)
     log('system', 'FFmpeg ses motoru hatası')
+    broadcast()
+  },
+  onEvent: event => {
+    if (event.type === 'encoderRestart') engineCounters.encoderRestarts += 1
+    if (event.type === 'decoderStall') engineCounters.stallRecoveries += 1
+    if (event.type === 'micInputOverflow') engineCounters.micInputOverflows += 1
+    if (event.type === 'micOutputDropped') engineCounters.micOutputDroppedBytes += event.bytes
+  },
+  onMicStopped: reason => {
+    if (!micSession) return
+    clearMicSession()
+    if (!['finished', 'stopped'].includes(reason)) log('microphone', 'Mikrofon anonsu kesildi — yeniden başlatın')
     broadcast()
   }
 })
@@ -639,10 +709,25 @@ function isLocalRequest(req) {
   const addr = req.socket?.remoteAddress || ''
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
 }
+function isSecureRequest(req) {
+  // Express is not behind a trusted reverse proxy here. Use the socket itself so an
+  // untrusted X-Forwarded-Proto header can never turn a plaintext LAN request into an
+  // authenticated one.
+  return Boolean(req.socket?.encrypted)
+}
+function requireSecureAdmin(req, res) {
+  res.status(426).json({
+    error: 'Yönetici işlemleri için HTTPS gereklidir',
+    https: `https://${req.hostname || 'bu bilgisayar'}:${httpsPort}/listen#admin`
+  })
+}
 function requireAdmin(req, res, next) {
   if (isLocalRequest(req)) return next()                        // the desk PC / Electron
-  if (validAdminToken(req.get('x-admin-token'))) return next()   // phone that logged in
-  return res.status(403).json({ error: 'Yetkisiz işlem: yönetici girişi gerekli' })
+  if (!validAdminToken(req.get('x-admin-token'))) {
+    return res.status(403).json({ error: 'Yetkisiz işlem: yönetici girişi gerekli' })
+  }
+  if (!isSecureRequest(req)) return requireSecureAdmin(req, res)
+  return next()   // phone that logged in over HTTPS
 }
 // Guards the few things only the café's own machine may see or do — reading the
 // current admin code, and minting a new one.
@@ -696,8 +781,8 @@ const ALLOWED_AUDIO = /^audio\//i
 const ALLOWED_AUDIO_EXT = /\.(mp3|wav|ogg|oga|m4a|aac|flac|opus|weba|wma)$/i
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (req, file, callback) => callback(null, mediaRootFor(req.params.kind)),
-    filename: (req, file, callback) => callback(null, `${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._ -]/g, '_')}`)
+    destination: (req, file, callback) => callback(null, incomingRoot),
+    filename: (req, file, callback) => callback(null, `${Date.now()}-${crypto.randomUUID()}-${file.originalname.replace(/[^a-zA-Z0-9._ -]/g, '_')}`)
   }),
   // Only accept audio: block .exe/.bat/etc. from landing in the media folders, and cap
   // size to a sane value for a cafe. The EXTENSION is what decides whether the saved file
@@ -724,6 +809,7 @@ app.get('/live.mp3', (req, res) => { noteReachedVia(req); audioEngine.hub.attach
 app.get('/api/state', (req, res) => { noteReachedVia(req); res.json(publicState()) })
 // A phone trades the typed code for a session token. The code is never sent back.
 app.post('/api/admin/login', (req, res) => {
+  if (!isLocalRequest(req) && !isSecureRequest(req)) return requireSecureAdmin(req, res)
   const ip = req.socket?.remoteAddress || 'bilinmiyor'
   // The per-address lock below is the polite brake; this one is the real one. Measured on
   // this machine: an address that has been locked out can log in from a different address
@@ -737,7 +823,13 @@ app.post('/api/admin/login', (req, res) => {
     // Reported once per episode, by the brake itself — a burst of failed logins on the café
     // Wi-Fi is worth knowing about, and writing a line per attempt would bury the history
     // under the attack.
-    if (loginBrake.noteFailure()) log('system', 'Çok sayıda hatalı yönetici kodu denemesi — girişler geçici olarak durduruldu')
+    if (loginBrake.noteFailure()) {
+      log('system', 'Çok sayıda hatalı yönetici kodu denemesi — girişler geçici olarak durduruldu')
+      // Return the global-brake response on the attempt that reaches the threshold. Waiting
+      // for a 31st request made the lock appear ineffective to callers that alternate
+      // addresses and stop immediately after the threshold attempt.
+      return res.status(429).json({ error: 'Çok fazla hatalı deneme. Birkaç dakika sonra tekrar deneyin.' })
+    }
     return res.status(403).json({ error: 'Kod yanlış' })
   }
   loginBrake.noteSuccess()
@@ -746,7 +838,11 @@ app.post('/api/admin/login', (req, res) => {
   broadcast()
   res.json({ token: issueAdminToken(), expiresInHours: ADMIN_TOKEN_TTL / 3600000 })
 })
-app.post('/api/admin/logout', (req, res) => { adminTokens.delete(req.get('x-admin-token')); res.sendStatus(204) })
+app.post('/api/admin/logout', (req, res) => {
+  if (!isLocalRequest(req) && !isSecureRequest(req)) return requireSecureAdmin(req, res)
+  adminTokens.delete(req.get('x-admin-token'))
+  res.sendStatus(204)
+})
 // Shown on the desk PC's panel so the operator can read the code off their own screen.
 app.get('/api/admin/code', requireLocal, (req, res) => res.json({ code: adminCode, fromEnv: !!process.env.ADMIN_CODE }))
 // Lets the operator confirm the status report actually arrives, from the café PC, without
@@ -835,7 +931,11 @@ app.post('/api/listeners/heartbeat', (req, res) => {
 app.post('/api/control', requireAdmin, (req, res) => {
   const { action, value } = req.body
   if (action === 'play') {
-    if (!itemById(state.playback.currentId)) advance()   // no current, or it was deleted → pick a fresh track
+    if (!itemById(state.playback.currentId)) {
+      // A deliberate Play starts another pass after a non-repeating queue ended.
+      state.queues.musicCycleStarted = false
+      advance()
+    }
     else {
       // Resume from the frozen position instead of jumping to the live edge.
       const position = Number(state.playback.currentOffsetSeconds || 0)
@@ -864,7 +964,7 @@ app.post('/api/control', requireAdmin, (req, res) => {
   let manualAdSkipped = false
   if (action === 'manualAd') {
     if (!state.ads.length) { manualAdSkipped = true; log('system', 'Çalınacak reklam yok') }
-    else { advance({ manualAd: true }); if (state.adSettings.manualResetsCounters) state.playback.tracksSinceAd = 0 }
+    else advance({ manualAd: true })
   }
   if (action === 'playTrack' && value) {
     const inAds = state.ads.some(a => a.id === value)
@@ -887,8 +987,26 @@ app.post('/api/control', requireAdmin, (req, res) => {
     state.playback.currentStartedAt = new Date(Date.now() - position * 1000).toISOString()
     log('system', `Yayın ${Math.floor(position)}. saniyeye alındı`)
   }
-  if (action === 'microphoneStart') { state.microphone = { ...(state.microphone || {}), enabled: true }; if (value) audioEngine.micSampleRate = Math.max(8000, Math.min(96000, Number(value) || 48000)); log('microphone', 'Canlı mikrofon anonsu başlatıldı') }
-  if (action === 'microphoneStop') { state.microphone = { ...(state.microphone || {}), enabled: false }; audioEngine.stopMic(); log('microphone', 'Canlı mikrofon anonsu sonlandırıldı') }
+  if (action === 'microphoneStart') {
+    if (micSession || audioEngine.micActive) return res.status(409).json({ error: 'Başka bir anons açık veya son sesi tamamlanıyor' })
+    const id = req.body.micSessionId
+    if (id != null && (typeof id !== 'string' || !/^[A-Za-z0-9-]{16,128}$/.test(id))) return res.status(400).json({ error: 'Geçersiz mikrofon oturumu' })
+    const rate = Number(value || 48000)
+    if (!Number.isInteger(rate) || rate < 8000 || rate > 96000) return res.status(400).json({ error: 'Geçersiz mikrofon örnekleme hızı' })
+    micSession = { id: id || crypto.randomUUID(), legacy: !id, owner: micOwner(req), accepting: true }
+    audioEngine.micSampleRate = rate
+    state.microphone = { ...(state.microphone || {}), enabled: true, sessionId: micSession.id }
+    touchMicSession()
+    log('microphone', 'Canlı mikrofon anonsu başlatıldı')
+  }
+  if (action === 'microphoneStop') {
+    // An id-less control is the operator's explicit force-stop, including another device.
+    // A sender's delayed cleanup carries its id and must never stop a newer announcement.
+    if (req.body.micSessionId && !matchesMicSession(req, req.body.micSessionId)) return res.sendStatus(409)
+    clearMicSession()
+    audioEngine.stopMic()
+    log('microphone', 'Canlı mikrofon anonsu sonlandırıldı')
+  }
   // Pause/stop silence the broadcast; everything else (re)starts the encoder,
   // which now resumes at the true position instead of restarting the track.
   // microphoneStart/Stop drive the mic pipeline directly (startMic on first chunk).
@@ -926,15 +1044,24 @@ app.post('/api/control', requireAdmin, (req, res) => {
 // it here in small ordered chunks. The first chunk starts the mix; PCM is
 // headerless so it survives track changes without desync.
 app.post('/api/mic/chunk', requireAdmin, express.raw({ type: '*/*', limit: '2mb' }), (req, res) => {
-  if (!state.microphone?.enabled) return res.sendStatus(409)
+  if (!matchesMicSession(req) || !micSession.accepting) return res.sendStatus(409)
   const chunk = req.body
   if (chunk && chunk.length) {
     if (!audioEngine.micActive) audioEngine.startMic()
-    audioEngine.writeMic(chunk)
+    if (!audioEngine.writeMic(chunk)) return res.sendStatus(429)
+    touchMicSession()
   }
   res.sendStatus(204)
 })
-app.post('/api/mic/end', requireAdmin, (req, res) => { audioEngine.stopMic(); res.sendStatus(204) })
+app.post('/api/mic/end', requireAdmin, (req, res) => {
+  if (!matchesMicSession(req) || !micSession.accepting) return res.sendStatus(409)
+  micSession.accepting = false
+  if (micIdleTimer) { clearTimeout(micIdleTimer); micIdleTimer = null }
+  state.microphone.enabled = false
+  audioEngine.finishMic()
+  broadcast()
+  res.sendStatus(204)
+})
 app.patch('/api/settings', requireAdmin, (req, res) => {
   const { station, playback, adSettings, microphone, ezan } = req.body
   // Everything below is accepted FIELD BY FIELD rather than spread in wholesale. The old
@@ -962,8 +1089,8 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
       }
     }
   }
-  // Shuffle is the only playback field the UI edits through settings; transport and volume
-  // go through /api/control, which validates them.
+  // Transport and volume go through /api/control; queue policy is editable here.
+  if (playback && typeof playback.loop === 'boolean') state.playback.loop = playback.loop
   if (playback && typeof playback.shuffle === 'boolean' && playback.shuffle !== state.playback.shuffle) {
     state.playback.shuffle = playback.shuffle
     // The queue was already built under the OLD setting and is drained one track at a time,
@@ -980,6 +1107,7 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
     save()
   }
   if (adSettings) {
+    const previousTimed = `${state.adSettings.timedEnabled}:${state.adSettings.timedMinutes}`
     if (typeof adSettings.songsEnabled === 'boolean') state.adSettings.songsEnabled = adSettings.songsEnabled
     if (typeof adSettings.timedEnabled === 'boolean') state.adSettings.timedEnabled = adSettings.timedEnabled
     if (typeof adSettings.manualResetsCounters === 'boolean') state.adSettings.manualResetsCounters = adSettings.manualResetsCounters
@@ -994,7 +1122,7 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
       const minutes = Math.floor(Number(adSettings.timedMinutes))
       if (Number.isFinite(minutes) && minutes >= 1) state.adSettings.timedMinutes = Math.min(MAX_TIMED_MINUTES, minutes)
     }
-    resetTimedAd()
+    if (previousTimed !== `${state.adSettings.timedEnabled}:${state.adSettings.timedMinutes}`) resetTimedAd()
   }
   if (microphone && microphone.ducking != null) {
     const ducking = Number(microphone.ducking)
@@ -1002,6 +1130,7 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
   }
   if (ezan) {
     // Only accept the user-editable fields; the rest are driven by the server.
+    const enabledChanged = typeof ezan.enabled === 'boolean' && ezan.enabled !== state.ezan.enabled
     if (typeof ezan.enabled === 'boolean') state.ezan.enabled = ezan.enabled
     let locChanged = false
     if (typeof ezan.il === 'string' && ezan.il.trim() && ezan.il.trim() !== state.ezan.il) { state.ezan.il = ezan.il.trim(); locChanged = true }
@@ -1010,6 +1139,10 @@ app.patch('/api/settings', requireAdmin, (req, res) => {
     // clear the backoff so they are not left waiting out a retry window they cannot see.
     if (locChanged || ezan.enabled === true) { ezanFailures = 0; ezanRetryAt = 0 }
     if (locChanged) { state.ezan.times = {}; state.ezan.timesDate = null; state.ezan.lastError = null }
+    if (locChanged || enabledChanged) {
+      ezanRevision += 1
+      ezanFetching?.controller.abort()
+    }
     if (ezan.durationMinutes != null) state.ezan.durationMinutes = Math.max(1, Math.min(60, Number(ezan.durationMinutes) || 8))
     ezanTick().catch(() => {}) // re-evaluate (fetch new times / activate / clear) right away
   }
@@ -1131,31 +1264,30 @@ app.post('/api/media/:kind', requireAdmin, (req, res, next) => {
 }, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Dosya bulunamadı' })
   const kind = req.params.kind
-  const probed = await probeFile(req.file.path)
   // The file's own tags win over its name: an operator uploading '01 - Track 01.mp3' means
   // the song inside it, and that is what the customer sees on the listener page.
   // Music tags beat filenames — someone else made the file and named the song properly.
   // Ads are the opposite: the operator produced this one and typed its name in this app's own
   // folder, while the tool that exported it may have left 'Track 1' inside. There is no rename
   // here, so a tag winning would replace a deliberate name with junk and leave no way back.
-  const title = (kind === 'ad' ? null : probed.title) || path.parse(req.file.originalname).name
-  const item = { id: crypto.randomUUID(), title, artist: probed.artist || 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: probed.durationSeconds, tagsRead: true, gainDb: await probeLoudness(req.file.path) ?? 0, addedAt: new Date().toISOString() }
-  // The file is on disk before the two ffmpeg probes above run, so a folder scan during
-  // that second or two sees it, finds no library entry, and adds one of its own — then this
-  // handler added a SECOND entry for the same file. Both survive pruning (the file exists),
-  // so the track stayed listed twice for good and deleting one left the other pointing at a
-  // file that was gone. Reproduced on the first attempt, so: adopt the scan's entry instead.
-  const list = kind === 'ad' ? state.ads : state.music
-  const existing = list.find(entry => entry.filename === req.file.filename)
-  if (existing) {
-    existing.title = title
-    existing.durationSeconds = item.durationSeconds ?? existing.durationSeconds
-    existing.gainDb = item.gainDb ?? existing.gainDb
-  } else {
+  try {
+    const probed = await probeFile(req.file.path)
+    const gainDb = await probeLoudness(req.file.path) ?? 0
+    const title = (kind === 'ad' ? null : probed.title) || path.parse(req.file.originalname).name
+    const destination = path.join(mediaRootFor(kind), req.file.filename)
+    // No await between publishing the complete file and its record: a scan sees both.
+    const version = mediaFileVersion(req.file.path)
+    if (!version) throw new Error('Yüklenen dosya artık bulunamıyor')
+    fs.renameSync(req.file.path, destination)
+    const item = { id: crypto.randomUUID(), title, artist: probed.artist || 'Bilinmeyen sanatçı', filename: req.file.filename, durationSeconds: probed.durationSeconds, tagsRead: true, gainDb, fileVersion: mediaFileVersion(destination), addedAt: new Date().toISOString() }
+    const list = kind === 'ad' ? state.ads : state.music
     list.push(item)
+    log('system', `${kind === 'ad' ? 'Reklam' : 'Müzik'} eklendi: ${title}`)
+    broadcast(); res.status(201).json(item)
+  } catch (error) {
+    try { fs.unlinkSync(req.file.path) } catch {}
+    res.status(500).json({ error: `Dosya kütüphaneye eklenemedi: ${error.message}` })
   }
-  log('system', `${kind === 'ad' ? 'Reklam' : 'Müzik'} eklendi: ${title}`)
-  broadcast(); res.status(201).json(existing || item)
 })
 // Open the media folder in the OS file manager so the operator can drop files in
 // directly. The library auto-scans these folders, so dropped files appear on their own.
@@ -1172,22 +1304,48 @@ app.post('/api/rescan', requireAdmin, async (req, res) => {
   // joining it would answer with a library that still lacks exactly what "Yenile" was
   // pressed for. Wait for it to finish, then run a fresh pass of our own.
   if (scanning) await scanning
-  await scanLibrary()
+  const result = await scanLibrary()
+  if (!result.ok) return res.status(503).json({ error: result.error, state: publicState() })
   res.json(publicState())
 })
-app.delete('/api/media/:kind/:id', requireAdmin, (req, res) => {
+// Windows keeps an audio file locked until ffmpeg has emitted its `close` event. Deleting
+// the track that is on air therefore needs a short, bounded hand-off: stop the decoder,
+// wait for the handle to be released, then remove the file. Returning EBUSY immediately
+// made the normal "replace the song currently playing" operation look like a permission
+// failure and left the operator with no way to remove it from the panel.
+async function unlinkMediaFile(filePath) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try { fs.unlinkSync(filePath); return }
+    catch (error) {
+      if (error.code === 'ENOENT') return
+      if (!['EBUSY', 'EPERM'].includes(error.code) || attempt === 11) throw error
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+}
+app.delete('/api/media/:kind/:id', requireAdmin, async (req, res) => {
   const dir = mediaRootFor(req.params.kind)
   const key = KIND_KEY[req.params.kind]
   if (!dir || !key) return res.status(404).json({ error: 'Geçersiz medya türü' })
   const index = state[key].findIndex(item => item.id === req.params.id)
   if (index < 0) return res.sendStatus(404)
-  const [item] = state[key].splice(index, 1)
-  try { fs.unlinkSync(path.join(dir, item.filename)) } catch {}
+  const item = state[key][index]
+  const current = state.playback.currentId === req.params.id
+  const wasPlaying = current && state.playback.status === 'playing'
+  // Release the Windows file handle before trying to unlink the current track. The encoder
+  // remains alive and emits silence during this small transition.
+  if (wasPlaying) audioEngine.stop()
+  try { await unlinkMediaFile(path.join(dir, item.filename)) } catch (error) {
+    // A failed delete must not strand the station in silence after the decoder was stopped.
+    if (wasPlaying) audioEngine.playCurrent()
+    return res.status(500).json({ error: `Dosya silinemedi: ${error.message}` })
+  }
+  state[key].splice(index, 1)
   // Purge any stale queue entry for this track.
   state.queues.music = state.queues.music.filter(qid => qid !== req.params.id)
   // If the track being removed is the one on air, move on cleanly instead of
   // leaving a dangling currentId that silently plays nothing.
-  if (state.playback.currentId === req.params.id) {
+  if (current) {
     if (state.playback.status === 'playing') { advance(); audioEngine.playCurrent() }
     else { setCurrent(null, null); audioEngine.stop() }
   }
@@ -1216,6 +1374,15 @@ app.use((err, req, res, next) => {
 let scanning = null
 // Whether the last scan threw — one report per episode, not one per 15-second pass.
 let scanFailing = false
+function mediaFileVersion(filePath) {
+  try {
+    const stat = fs.statSync(filePath)
+    return stat.isFile() ? `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` : null
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+    throw error
+  }
+}
 function scanLibrary() {
   if (scanning) return scanning
   scanning = runScan().finally(() => { scanning = null })
@@ -1223,6 +1390,8 @@ function scanLibrary() {
 }
 async function runScan() {
   let changed = false
+  const failures = []
+  const fresh = new Set()
   // Shared across both folders so a pass never analyses more than this many files total.
   let loudnessBudget = LOUDNESS_PER_SCAN
   // ffmpeg -i only reads headers, so this can be more generous than the loudness budget:
@@ -1232,19 +1401,33 @@ async function runScan() {
     for (const [kind, key] of Object.entries(KIND_KEY)) {
       const dir = mediaRoots[kind]
       let files = []
-      try { files = fs.readdirSync(dir).filter(f => SCAN_AUDIO_RE.test(f)) } catch { continue }
-      const present = new Set(files)
+      try { files = fs.readdirSync(dir).filter(f => SCAN_AUDIO_RE.test(f)) } catch (error) {
+        failures.push(`${kind === 'ad' ? 'Reklam' : 'Müzik'} klasörü: ${error.message}`)
+        continue
+      }
       for (const filename of files) {
-        if (state[key].some(item => item.filename === filename)) continue
-        const probed = await probeFile(path.join(dir, filename))
+        const filePath = path.join(dir, filename)
+        const version = mediaFileVersion(filePath)
+        if (!version) continue
+        const prior = state[key].find(item => item.filename === filename)
+        if (prior?.fileVersion === version) continue
+        const probed = await probeFile(filePath)
+        // The operator may replace/delete a file while ffmpeg is reading it. Never
+        // attach measurements to a different version or resurrect a deleted record.
+        if (mediaFileVersion(filePath) !== version || (prior && !state[key].includes(prior))) continue
+        const concurrent = state[key].find(item => item.filename === filename)
+        if (!prior && concurrent) continue
         const useTags = key !== 'ads'          // reklamlar operatörün verdiği adı korur
-        const item = { id: crypto.randomUUID(), title: (useTags && probed.title) || path.parse(filename).name, artist: (useTags && probed.artist) || 'Bilinmeyen sanatçı', filename, durationSeconds: probed.durationSeconds, tagsRead: true, addedAt: new Date().toISOString() }
-        // Re-check after the await. Probing yields for a second or so, and an upload of this
-        // very file can land its own entry in that gap — the check above was made against a
-        // library that no longer exists. Skipping here is what keeps the track from being
-        // listed twice for good (both copies point at a real file, so pruning keeps both).
-        if (state[key].some(entry => entry.filename === filename)) continue
-        state[key].push(item)
+        const item = prior || { id: crypto.randomUUID(), filename, addedAt: new Date().toISOString() }
+        const fallbackTitle = prior && (!prior.fileVersion || !useTags) ? prior.title : path.parse(filename).name
+        Object.assign(item, { title: (useTags && probed.title) || fallbackTitle || path.parse(filename).name, artist: (useTags && probed.artist) || 'Bilinmeyen sanatçı', durationSeconds: probed.durationSeconds, tagsRead: true, fileVersion: version })
+        delete item.gainDb
+        delete item.probeFailures
+        if (!probed.durationSeconds) item.probeFailures = 1
+        if (!prior) state[key].push(item)
+        // An active decoder keeps its current gain until the next play/seek. Do not
+        // restart a song mid-broadcast just because its replacement was measured.
+        fresh.add(item)
         changed = true
       }
       // Fill in durations that are still missing — but GIVE UP on a file that keeps failing.
@@ -1253,11 +1436,14 @@ async function runScan() {
       // library as changed every time, fanning a full state broadcast out to every phone.
       // A file that cannot be read three times running is not going to start working.
       for (const item of state[key]) {
+        if (fresh.has(item)) continue
         if (item.durationSeconds) continue
         if ((item.probeFailures || 0) >= MAX_PROBE_ATTEMPTS) continue
         const filePath = path.join(dir, item.filename)
-        if (!fs.existsSync(filePath)) continue
+        const version = mediaFileVersion(filePath)
+        if (!version || version !== item.fileVersion) continue
         const duration = (await probeFile(filePath)).durationSeconds
+        if (!state[key].includes(item) || mediaFileVersion(filePath) !== version) continue
         if (duration) {
           item.durationSeconds = duration
           delete item.probeFailures
@@ -1288,9 +1474,11 @@ async function runScan() {
         if (key === 'ads') { item.tagsRead = true; changed = true; continue }
         if (tagBudget <= 0) break
         const filePath = path.join(dir, item.filename)
-        if (!fs.existsSync(filePath)) continue
+        const version = mediaFileVersion(filePath)
+        if (!version || version !== item.fileVersion) continue
         tagBudget -= 1
         const probed = await probeFile(filePath)
+        if (!state[key].includes(item) || mediaFileVersion(filePath) !== version) continue
         item.tagsRead = true
         // Only overwrite with something real. A file whose tags cannot be read keeps the
         // name it has, which is its filename — the same place it came from.
@@ -1306,18 +1494,25 @@ async function runScan() {
         if (loudnessBudget <= 0) break
         if (item.gainDb != null || !item.durationSeconds) continue
         const filePath = path.join(dir, item.filename)
-        if (!fs.existsSync(filePath)) continue
+        const version = mediaFileVersion(filePath)
+        if (!version || version !== item.fileVersion) continue
         loudnessBudget -= 1
         const gain = await probeLoudness(filePath)
+        if (!state[key].includes(item) || mediaFileVersion(filePath) !== version) continue
         // Store 0 rather than leaving it unset when analysis fails, so a file ffmpeg
         // cannot measure isn't retried on every single scan for the life of the station.
         item.gainDb = gain == null ? 0 : gain
         changed = true
       }
       const before = state[key].length
-      state[key] = state[key].filter(item => present.has(item.filename))
+      // Re-read current existence, not the listing from before the awaits: a newly
+      // completed upload was absent from that old listing and must stay in the library.
+      state[key] = state[key].filter(item => mediaFileVersion(path.join(dir, item.filename)) != null)
       if (state[key].length !== before) changed = true
     }
+  } catch (error) {
+    failures.push(error?.message || 'bilinmeyen hata')
+  }
     if (changed) {
       state.queues.music = state.queues.music.filter(id => state.music.some(m => m.id === id))
       broadcast()
@@ -1333,21 +1528,24 @@ async function runScan() {
       audioEngine.playCurrent()
       broadcast()
     }
-  } catch (error) {
+  if (failures.length) {
     // A scan that throws (an unreadable folder, a disconnected network drive) must not
     // reject into its callers — /api/rescan would answer 500 and the 15s tick would log an
     // unhandled rejection. Report it and let the next pass try again.
-    console.error('Kütüphane taraması başarısız:', error?.message)
+    const message = failures.join('; ')
+    console.error('Kütüphane taraması başarısız:', message)
     // The operator drops files into the folder and presses "Yenile"; if the scan is failing
     // nothing appears and the panel gives no reason. Throttled like the save warning: this
     // runs every 15 seconds, so reporting each pass would bury the history.
     if (!scanFailing) {
       scanFailing = true
-      log('system', `Müzik klasörü taranamıyor: ${error?.message || 'bilinmeyen hata'}`)
+      log('system', `Müzik klasörü taranamıyor: ${message}`)
+      broadcast()
     }
-    return
+    return { ok: false, error: `Kütüphane taranamadı: ${message}` }
   }
   if (scanFailing) { scanFailing = false; log('system', 'Müzik klasörü yeniden taranabiliyor') }
+  return { ok: true }
 }
 // ── Durum raporu (uzaktan izleme) ────────────────────────────────────────────
 // The café PC is somewhere else, on a network nobody here can reach, running other business
@@ -1370,7 +1568,6 @@ let lastReportAt = 0
 const startedAt = Date.now()
 // Counters the report carries: how often the engine had to save itself. A café that never
 // looks at its PC still gets to find out its encoder is restarting twice an hour.
-const engineCounters = { encoderRestarts: 0, trackFailures: 0, stallRecoveries: 0, engineErrors: 0 }
 function readReportConfig() {
   try {
     const cfg = JSON.parse(fs.readFileSync(reportConfigPath, 'utf8'))
@@ -1403,6 +1600,9 @@ function buildReport(reason) {
     network: {
       ip: getLanIp(),
       addresses: listLanIps(),
+      port,
+      httpsPort,
+      https: { ...httpsStatus },
       preferredIp: state.station.preferredIp || null,
       preferredMissing: !!state.station.preferredIp && !listLanIps().some(x => x.ip === state.station.preferredIp),
       reachedVia: reachedViaList(),
@@ -1467,7 +1667,7 @@ function sweepAuth() {
 let firewallPosture = null
 let firewallProblemReported = false
 async function checkFirewall() {
-  const posture = await readWindowsNetworkPosture()
+  const posture = await readWindowsNetworkPosture({ ports: [port, httpsPort], program: process.execPath })
   if (!posture) return                       // no answer is not evidence — say nothing
   firewallPosture = posture
   if (posture.problem && !firewallProblemReported) {
@@ -1476,7 +1676,7 @@ async function checkFirewall() {
     broadcast()
   } else if (!posture.problem && firewallProblemReported) {
     firewallProblemReported = false
-    log('system', 'Ağ izinleri düzeldi — telefonlar yeniden bağlanabilir')
+    log('system', 'Önceki Windows kural uyarısı artık görülmüyor; telefondan erişim ayrıca doğrulanmalı')
     broadcast()
   }
 }
@@ -1516,7 +1716,8 @@ if (state.playback.status === 'playing' && state.playback.currentId) {
 
 // ---- Ezan (call to prayer) auto-pause: Diyanet times via Aladhan method=13 ----
 const PRAYER_MAP = [['Sabah', 'Fajr'], ['Öğle', 'Dhuhr'], ['İkindi', 'Asr'], ['Akşam', 'Maghrib'], ['Yatsı', 'Isha']]
-let ezanFetching = false
+let ezanFetching = null
+let ezanRevision = 0
 // Retry backoff for the prayer-times API. A café with no internet used to re-request every
 // 20 seconds for ever — thousands of failed calls a day against a public service, which is
 // the sort of thing that gets an address blocked, and then the feature stays broken even
@@ -1527,20 +1728,21 @@ let ezanRetryAt = 0
 // Overridable so the retry behaviour can be tested without depending on a live service.
 const EZAN_API_URL = process.env.EZAN_API_URL || 'https://api.aladhan.com/v1/timingsByAddress'
 function todayStr() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
-async function fetchPrayerTimes() {
-  const il = String(state.ezan.il || 'İstanbul').trim() || 'İstanbul'
-  const ilce = String(state.ezan.ilce || '').trim()
-  const address = `${ilce ? ilce + ', ' : ''}${il}, Türkiye`
+function prayerRequestKey() { return JSON.stringify([state.ezan.il, state.ezan.ilce || '', todayStr(), ezanRevision]) }
+async function fetchPrayerTimes(request) {
+  const address = `${request.ilce ? request.ilce + ', ' : ''}${request.il}, Türkiye`
   const url = `${EZAN_API_URL}?address=${encodeURIComponent(address)}&method=13`
-  const res = await fetch(url, { signal: AbortSignal.timeout(10000) })
+  const res = await fetch(url, { signal: AbortSignal.any([request.controller.signal, AbortSignal.timeout(10000)]) })
   if (!res.ok) throw new Error('HTTP ' + res.status)
   const timings = (await res.json())?.data?.timings
   const times = {}
   for (const [tr, en] of PRAYER_MAP) { const m = String(timings?.[en] || '').match(/(\d{1,2}):(\d{2})/); if (m) times[tr] = `${m[1].padStart(2, '0')}:${m[2]}` }
   if (!Object.keys(times).length) throw new Error('Vakitler boş döndü')
+  if (request.key !== prayerRequestKey() || !state.ezan.enabled) return false
   state.ezan.times = times
-  state.ezan.timesDate = todayStr()
+  state.ezan.timesDate = request.date
   state.ezan.lastError = null
+  return true
 }
 function setEzanActive(prayer, until) {
   state.ezan.active = true
@@ -1579,20 +1781,29 @@ async function ezanTick() {
   const ez = state.ezan
   if (!ez.enabled) { if (ez.active) clearEzan(); return }
   if (ez.timesDate !== todayStr() || !Object.keys(ez.times || {}).length) {
-    if (!ezanFetching && Date.now() >= ezanRetryAt) {
-      ezanFetching = true
+    const key = prayerRequestKey()
+    if ((!ezanFetching || ezanFetching.key !== key) && Date.now() >= ezanRetryAt) {
+      ezanFetching?.controller.abort()
+      const request = { key, date: todayStr(), il: String(ez.il || 'İstanbul').trim() || 'İstanbul', ilce: String(ez.ilce || '').trim(), controller: new AbortController() }
+      ezanFetching = request
       try {
-        await fetchPrayerTimes()
-        ezanFailures = 0
-        ezanRetryAt = 0
-        broadcast()
+        if (await fetchPrayerTimes(request)) {
+          ezanFailures = 0
+          ezanRetryAt = 0
+          broadcast()
+        }
       } catch (error) {
-        ezanFailures += 1
-        ezanRetryAt = Date.now() + EZAN_RETRY_WAITS_MS[Math.min(ezanFailures - 1, EZAN_RETRY_WAITS_MS.length - 1)]
-        ez.lastError = error.message
-        broadcast()
-      } finally { ezanFetching = false }
+        if (request.key === prayerRequestKey() && ez.enabled) {
+          ezanFailures += 1
+          ezanRetryAt = Date.now() + EZAN_RETRY_WAITS_MS[Math.min(ezanFailures - 1, EZAN_RETRY_WAITS_MS.length - 1)]
+          ez.lastError = error.message
+          broadcast()
+        }
+      } finally { if (ezanFetching === request) ezanFetching = null }
+      // Midnight or an intervening settings edit invalidates both success and failure.
+      if (key !== prayerRequestKey()) return ezanTick()
     }
+    if (!ez.enabled) return
     if (!Object.keys(ez.times || {}).length) return
   }
   const now = new Date()
@@ -1637,21 +1848,27 @@ ezanTick().catch(() => {})
 function certCoversCurrentIps(certPem) {
   try {
     const { X509Certificate } = require('crypto')
-    const san = new X509Certificate(certPem).subjectAltName || ''
+    const cert = new X509Certificate(certPem)
     const ips = listLanIps().map(x => x.ip)
     if (!ips.length) return true   // nothing to cover yet; don't churn the certificate
-    return ips.every(ip => san.includes(ip))
-  } catch { return true }   // unreadable: leave it alone rather than regenerating in a loop
+    return ips.every(ip => cert.checkIP(ip) !== undefined)
+  } catch { return false }   // damaged certificates must be replaced, not reused
 }
 async function ensureCerts() {
+  refreshLanIps()
   const keyPath = path.join(certDir, 'key.pem')
   const certPath = path.join(certDir, 'cert.pem')
   if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
     const cert = fs.readFileSync(certPath)
-    if (certCoversCurrentIps(cert)) return { key: fs.readFileSync(keyPath), cert }
+    const key = fs.readFileSync(keyPath)
+    try {
+      // A power loss between the two renames can leave a mismatched pair. Recover it on
+      // the next check instead of disabling HTTPS until someone deletes files manually.
+      if (certCoversCurrentIps(cert) && new crypto.X509Certificate(cert).checkPrivateKey(crypto.createPrivateKey(key))) return { key, cert }
+    } catch {}
     console.log('Ağ adresi değişmiş — HTTPS sertifikası yeni adrese göre yenileniyor.')
   }
-  const altNames = [{ type: 2, value: 'localhost' }, { type: 7, ip: '127.0.0.1' }]
+  const altNames = [{ type: 2, value: 'localhost' }, { type: 2, value: os.hostname() }, { type: 7, ip: '127.0.0.1' }]
   // Fresh read: a certificate is minted once and lived with for years, so it must name the
   // addresses the machine has right now, not a list cached moments earlier.
   for (const { ip } of refreshLanIps()) altNames.push({ type: 7, ip })
@@ -1666,8 +1883,10 @@ async function ensureCerts() {
       { name: 'subjectAltName', altNames }
     ]
   })
-  fs.writeFileSync(keyPath, pems.private)
-  fs.writeFileSync(certPath, pems.cert)
+  fs.writeFileSync(keyPath + '.tmp', pems.private)
+  fs.writeFileSync(certPath + '.tmp', pems.cert)
+  fs.renameSync(keyPath + '.tmp', keyPath)
+  fs.renameSync(certPath + '.tmp', certPath)
   // Owner-only where the filesystem enforces it; a no-op on plain Windows volumes.
   try { fs.chmodSync(keyPath, 0o600) } catch {}
   console.log('Bu kuruluma özel HTTPS sertifikası üretildi.')
@@ -1679,12 +1898,8 @@ async function ensureCerts() {
 // report that honestly instead of pretending.
 function startServer({ updater } = {}) {
   appUpdater = updater || null
-  // `exclusive: true` matters on Windows. Without it two processes can BOTH bind this port —
-  // the second one even logs that it started — and incoming connections are then handed to
-  // one of them unpredictably. Two stations end up running, each with its own encoder, each
-  // believing it is fine, while phones reach whichever socket the OS picked. Measured: a
-  // second instance bound 0.0.0.0:8090 without complaint. Refusing the bind turns that into
-  // an error we can report instead of a mystery in the café.
+  // Separate processes are protected by the OS bind and Electron's instance lock;
+  // exclusive only disables cluster handle sharing, not a general Windows process lock.
   // Listen on '::' rather than '0.0.0.0': that serves IPv6 AND IPv4 clients on the same
   // socket. It matters because a phone reaching the PC by NAME gets IPv6 first — measured on
   // this machine, the hostname resolves to fe80::… before 192.168.1.14 — and an IPv4-only
@@ -1710,15 +1925,44 @@ function startServer({ updater } = {}) {
       : `Sunucu başlatılamadı: ${error?.message}`
     console.error(message)
     httpServer.startupError = message
+    httpServer.emit('startup-failed', Object.assign(error, { userMessage: message }))
   })
   // Also serve HTTPS (self-signed) so phones get a secure context for the mic. Generating
   // a key takes a moment, so HTTPS comes up slightly after HTTP rather than blocking it —
   // the Electron window waits on the HTTP listener, which is already live.
   let httpsServer = null
   let shuttingDown = false
+  let currentCert = null
+  let certCheckBusy = false
+  const httpsFailed = error => {
+    const message = `Güvenli (HTTPS) sayfa kullanılamıyor: ${error.message}`
+    if (httpsStatus.error !== message) log('system', message)
+    httpsStatus.error = message
+    broadcast()
+  }
+  // Updating the secure context affects new TLS handshakes and leaves existing radio
+  // streams open. A cable/router change must not require restarting the audio engine.
+  const refreshHttpsCert = async () => {
+    if (shuttingDown || certCheckBusy || !httpsServer?.listening) return
+    certCheckBusy = true
+    try {
+      const creds = await ensureCerts()
+      if (shuttingDown) return
+      if (String(creds.cert) !== currentCert) {
+        httpsServer.setSecureContext(creds)
+        currentCert = String(creds.cert)
+        log('system', 'Ağ adresleri için HTTPS sertifikası yenilendi')
+      }
+      if (httpsStatus.error) { httpsStatus.error = null; broadcast() }
+    } catch (error) { if (!shuttingDown) httpsFailed(error) }
+    finally { certCheckBusy = false }
+  }
+  const certTimer = setInterval(refreshHttpsCert, 15000)
+  certTimer.unref?.()
   ensureCerts().then(creds => {
     if (shuttingDown) return
     httpsServer = https.createServer(creds, app)
+    currentCert = String(creds.cert)
     // Same dual-stack reasoning as the HTTP listener above — the announcement page is reached
     // by exactly the same addresses.
     let httpsFellBack = false
@@ -1728,19 +1972,27 @@ function startServer({ updater } = {}) {
         httpsServer.listen({ port: httpsPort, host: '0.0.0.0', exclusive: true })
         return
       }
-      console.error('HTTPS sunucu hatası:', error.message)
+      httpsStatus.listening = false
+      httpsFailed(error)
     })
     httpsServer.listen({ port: httpsPort, host: '::', exclusive: true },
-      () => console.log(`Rovli Radyo HTTPS https://127.0.0.1:${httpsPort}`))
+      () => {
+        httpsStatus.listening = true
+        httpsStatus.error = null
+        console.log(`Rovli Radyo HTTPS https://127.0.0.1:${httpsPort}`)
+        broadcast()
+      })
   }).catch(error => {
     console.error('HTTPS başlatılamadı:', error.message)
     // Without HTTPS the phone cannot use its microphone — browsers refuse getUserMedia on a
     // plain http page. The announcement button then just fails, and until now the only
     // record was a console line nobody sees. Say it where the operator will look.
-    log('system', `Güvenli (HTTPS) sayfa açılamadı — telefondan anons yapılamaz: ${error.message}`)
+    if (!shuttingDown) httpsFailed(error)
   })
   const shutdown = () => {
     shuttingDown = true
+    clearInterval(certTimer)
+    httpsStatus.listening = false
     clearInterval(tickTimer)      // stop ticks before closing so no write hits a dead socket
     // The firewall check is slow and asynchronous; a result landing after shutdown would
     // try to broadcast into sockets that are about to end.
@@ -1772,6 +2024,6 @@ if (require.main === module) {
   // port must not linger half-alive. Lingering is how two instances end up "running" at once,
   // with the operator unable to tell which one the phones are reaching. The desktop app does
   // not take this path — it handles the same event itself so it can show a dialog first.
-  server.on('error', () => process.exit(1))
+  server.on('startup-failed', () => process.exit(1))
 }
 module.exports = { startServer }

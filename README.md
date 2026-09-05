@@ -35,13 +35,19 @@ npm install
 npm run dev        # sunucu + arayüz + masaüstü penceresi
 ```
 
-Yalnızca sunucu: `npm start` → `http://127.0.0.1:8090`
+Yalnızca sunucu: `npm start` → dinleyici `http://127.0.0.1:8090`, yönetici/anons
+`https://127.0.0.1:8443/listen`. HTTPS sertifikası ilk açılışta bu bilgisayar için üretilir;
+LAN'daki telefonda tarayıcının gösterdiği sertifika uyarısı bir kez kabul edilmelidir.
 
 | Adres | Kim için |
 |---|---|
 | `/admin` | Kafe bilgisayarındaki yönetim paneli |
 | `/listen` | Telefonlar (QR bu adrese gider) |
 | `/live.mp3` | Canlı ses akışı |
+
+Telefon yönetici kodu ve mikrofon anonsu yalnızca HTTPS yönetici adresinde çalışır. Dinleyici
+sayfası ve canlı yayın HTTP üzerinden de açık kalır; bu, QR ile bağlanan müşterinin kod
+girmeden dinleyebilmesi içindir.
 
 ## Test
 

@@ -57,11 +57,11 @@
   nsExec::Exec 'netsh advfirewall firewall delete rule name="${FW_HTTPS}"'
 
   DetailPrint "      - programa izin: $INSTDIR\${APP_EXE}"
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${FW_APP}" dir=in action=allow program="$INSTDIR\${APP_EXE}" enable=yes profile=any'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${FW_APP}" dir=in action=allow program="$INSTDIR\${APP_EXE}" enable=yes profile=any remoteip=localsubnet'
   DetailPrint "      - port 8090 (telefonlarin dinledigi adres)"
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${FW_HTTP}" dir=in action=allow protocol=TCP localport=8090 profile=any'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${FW_HTTP}" dir=in action=allow protocol=TCP localport=8090 profile=any remoteip=localsubnet'
   DetailPrint "      - port 8443 (telefondan anons icin guvenli adres)"
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${FW_HTTPS}" dir=in action=allow protocol=TCP localport=8443 profile=any'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${FW_HTTPS}" dir=in action=allow protocol=TCP localport=8443 profile=any remoteip=localsubnet'
   DetailPrint ""
 
   DetailPrint "[3/3] Muzikleriniz ve ayarlariniz nerede tutulacak:"

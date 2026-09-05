@@ -5,7 +5,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
-import { AdminCodeCard, EzanCard, MasterBar, TrackList, Status, ErrorBoundary, BroadcastNotice } from '../../src/main.jsx'
+import { AdminCodeCard, Dashboard, EzanCard, MasterBar, Player, TrackList, Status, ErrorBoundary, BroadcastNotice } from '../../src/main.jsx'
 
 const baseStation = (overrides = {}) => ({
   station: { name: 'Rovli Radyo' },
@@ -177,6 +177,31 @@ describe('Şimdi çalıyor', () => {
   test('hiçbir şey çalmıyorsa yönlendirme metni çıkar', () => {
     render(<Status station={baseStation({ current: null })} />)
     expect(screen.getByText(/Müzik ekleyerek başlayın/)).toBeDefined()
+  })
+})
+
+describe('Oynatıcı döngüsü', () => {
+  test('tekrar düğmesi sunucu ayarını değiştirir', () => {
+    const save = vi.fn()
+    const station = baseStation({ playback: { ...baseStation().playback, loop: false } })
+    render(<Player station={station} control={vi.fn()} save={save} audioRef={{ current: null }} monitorReady={true} localVol={100} onLocalVol={vi.fn()} />)
+    const loop = screen.getByTitle('Tekrar kapalı')
+    fireEvent.click(loop)
+    expect(save).toHaveBeenCalledWith({ playback: { loop: true } })
+  })
+})
+
+describe('Elle reklam sayacı', () => {
+  test('ayar kapatılabilir ve API’ye gönderilir', async () => {
+    globalThis.fetch = jsonFetch({})
+    const station = baseStation({ adSettings: { ...baseStation().adSettings, manualResetsCounters: false } })
+    render(<Dashboard station={station} control={vi.fn()} setView={vi.fn()} mic={vi.fn()} audioRef={{ current: null }} monitorReady={true} localVol={100} onLocalVol={vi.fn()} />)
+    const checkbox = screen.getByText('Elle reklamda sayaçları sıfırla').closest('label').querySelector('input')
+    expect(checkbox.checked).toBe(false)
+    fireEvent.click(checkbox)
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled())
+    const [, options] = globalThis.fetch.mock.calls.at(-1)
+    expect(JSON.parse(options.body)).toEqual({ adSettings: { manualResetsCounters: true } })
   })
 })
 

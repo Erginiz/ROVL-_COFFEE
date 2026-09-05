@@ -1,131 +1,90 @@
-// This verdict is shown to the operator as an explanation for why phones cannot connect. A
-// wrong one is worse than none: a false alarm sends someone changing Windows settings that
-// were never the problem, and a missed one leaves the café exactly where it started.
-//
-// So the edges are pinned down here, against data shapes taken from a real machine
-// (Get-NetConnectionProfile / Get-NetFirewallRule) rather than invented.
-
 const test = require('node:test')
-const assert = require('node:assert')
+const assert = require('node:assert/strict')
 const { assessFirewall, ruleCovers } = require('../../server/firewall-check.cjs')
 
-const network = (name, category) => ({ name, category, interfaceAlias: 'Ethernet' })
-const rule = (displayName, profile) => ({ displayName, profile, enabled: true, action: 'Allow' })
+const program = 'C:\\Apps\\Rovli Radyo.exe'
+const profile = { name: 'Kafe', category: 'Public', interfaceAlias: 'Wi-Fi', ip: '192.168.1.5' }
+const policy = { name: 'Public', enabled: true, defaultInboundAction: 'Block', allowInboundRules: true }
+const rule = (extra = {}) => ({ displayName: 'Farklı isimli izin', profile: 'Any', enabled: true, action: 'Allow',
+  protocol: 'TCP', localPort: ['8090', '8443'], program, service: 'Any', localAddress: ['Any'], remoteAddress: ['Any'],
+  interfaceAlias: ['Any'], interfaceType: 'Any', authentication: 'NotRequired', ...extra })
+const assess = (rules, extra = {}) => assessFirewall({ profiles: [profile], policies: [policy], rules, ports: [8090, 8443], program, ...extra })
 
-test('Public ağda Private kural kapsamaz — kafenin muhtemel arızası', () => {
-  // The installer ran on the old network and scoped the rule to Private. A new router makes
-  // Windows file the network as Public, and the same rule silently stops applying.
-  const result = assessFirewall({
-    profiles: [network('Kafe Wi-Fi', 'Public')],
-    rules: [rule('Rovli Radyo', 'Private')]
-  })
+test('yalnız HTTPS izni HTTP erişimini kapsıyor sayılmaz', () => {
+  const result = assess([rule({ localPort: ['8443'] })])
+  assert.equal(result.networks[0].ports[0].status, 'missing-permission')
+  assert.equal(result.networks[0].ports[1].status, 'permission-found')
   assert.equal(result.problem, true)
-  assert.match(result.message, /Genel/)
-  assert.match(result.message, /Özel/, 'ne yapılacağını söylemeli')
+  assert.equal(result.connectivityVerified, false)
 })
-
-test('Any profilli kural her ağı kapsar', () => {
-  // What this project's own installer writes.
-  for (const category of ['Public', 'Private', 'DomainAuthenticated']) {
-    const result = assessFirewall({ profiles: [network('Ağ', category)], rules: [rule('Rovli Radyo', 'Any')] })
-    assert.equal(result.problem, false, `${category} kapsanmalı`)
+test('çakışan Block izinlerden önce raporlanır', () => {
+  const result = assess([rule(), rule({ action: 'Block', localPort: ['8090'] })])
+  assert.equal(result.networks[0].ports[0].status, 'blocked')
+  assert.equal(result.problem, true)
+})
+test('yanlış program yolu ve UDP izni TCP istasyon izni sayılmaz', () => {
+  for (const wrong of [{ program: 'C:\\Old\\Rovli Radyo.exe' }, { protocol: 'UDP' }, { localAddress: ['192.168.2.5'] }, { service: 'OtherService' }]) {
+    assert.equal(assess([rule(wrong)]).networks[0].ports[0].status, 'missing-permission')
   }
 })
-
-test('birleşik profil listesi üye üye eşleşir', () => {
-  const result = assessFirewall({
-    profiles: [network('Kafe', 'Public')],
-    rules: [rule('Rovli Radyo', 'Private, Public')]
-  })
+test('kurala isim yerine gerçek filtreleriyle bakılır', () => {
+  const result = assess([rule()])
   assert.equal(result.problem, false)
+  assert.equal(result.networks[0].ports[0].status, 'permission-found')
+  assert.equal(result.connectivityVerified, false, 'izin bulmak telefon erişimini kanıtlamaz')
 })
-
-test('etki alanı ağı ile Domain profili eşleşir', () => {
-  // The category is called DomainAuthenticated; the firewall calls the same thing Domain.
+test('Windows filtrelerinde büyük/küçük harf farkı sonucu değiştirmez', () => {
+  const result = assess([rule({ action: 'allow', profile: 'any', interfaceAlias: ['wi-fi'] })])
+  assert.equal(result.networks[0].ports[0].status, 'permission-found')
+})
+test('kapalı güvenlik duvarı ve varsayılan Allow için izinsizdir uyarısı verilmez', () => {
+  assert.equal(assess([], { policies: [{ ...policy, enabled: false }] }).problem, false)
+  assert.equal(assess([], { policies: [{ ...policy, defaultInboundAction: 'Allow' }] }).problem, false)
+})
+test('açık tüm gelenleri engelle politikası Allow kuralıyla gizlenmez', () => {
+  const result = assess([rule()], { policies: [{ ...policy, allowInboundRules: false }] })
+  assert.equal(result.networks[0].ports[0].status, 'blocked')
+})
+test('eksik veya sınırlı filtre verisi kesin hüküm oluşturmaz', () => {
+  const result = assess([{ displayName: 'Rovli', action: 'Allow', profile: 'Any' }])
+  assert.equal(result.networks[0].ports[0].status, 'unknown')
+  assert.equal(result.uncertain, true)
+  assert.equal(result.problem, false)
+  assert.match(result.message, /doğrulanamadı/)
+  assert.equal(assess([rule({ remoteAddress: ['10.0.0.0/24'] })]).uncertain, true)
+})
+test('LocalSubnet izni uzak router ağına erişim garantisi vermez', () => {
+  const result = assess([rule({ remoteAddress: ['LocalSubnet'] })])
+  assert.equal(result.networks[0].ports[0].status, 'local-subnet-permission')
+  assert.equal(result.connectivityVerified, false)
+  assert.match(result.message, /alt ağ/)
+})
+test('profil üyeleri eşleşir fakat boş kategori bilinmez', () => {
+  assert.equal(ruleCovers('Private, Public', 'Public'), true)
+  assert.equal(ruleCovers('Private', 'Public'), false)
   assert.equal(ruleCovers('Domain', 'DomainAuthenticated'), true)
-  assert.equal(ruleCovers('Private', 'DomainAuthenticated'), false)
+  assert.equal(ruleCovers('Any', ''), false)
+  assert.equal(ruleCovers('', 'Public'), false)
 })
-
-test('kapalı ve engelleyen kurallar sayılmaz', () => {
-  // A disabled rule and a Block rule are both present on real machines and neither lets
-  // anyone in; treating them as coverage would produce a confident, wrong "everything fine".
-  const result = assessFirewall({
-    profiles: [network('Kafe', 'Public')],
-    rules: [
-      { displayName: 'Kapalı', profile: 'Any', enabled: false, action: 'Allow' },
-      { displayName: 'Engelle', profile: 'Any', enabled: true, action: 'Block' }
-    ]
-  })
-  assert.equal(result.problem, true)
-})
-
-test('birden çok ağdan yalnızca kapsanmayanı bildirir', () => {
-  // Two routers is the café's actual situation: one network may be fine while the other,
-  // the one the phones are on, is not.
-  const result = assessFirewall({
-    profiles: [network('Ofis', 'Private'), network('Kafe Misafir', 'Public')],
-    rules: [rule('Rovli Radyo', 'Private')]
-  })
-  assert.equal(result.problem, true)
-  assert.equal(result.blocked.length, 1)
-  assert.equal(result.blocked[0].name, 'Kafe Misafir')
-})
-
-test('hepsi kapsanıyorsa hiçbir şey söylenmez', () => {
-  const result = assessFirewall({
-    profiles: [network('Ofis', 'Private')],
-    rules: [rule('Rovli Radyo', 'Private')]
-  })
+test('Windows bilgisi alınmadıysa erişim hakkında hüküm verilmez', () => {
+  const result = assessFirewall()
+  assert.equal(result.checked, false)
   assert.equal(result.problem, false)
-  assert.equal(result.message, null)
+  assert.equal(result.connectivityVerified, false)
 })
-
-test('bilgi alınamadıysa hüküm verilmez', () => {
-  // Windows may refuse the query, the machine may be something else entirely. Silence is the
-  // only honest answer — a warning with no evidence behind it teaches the operator to ignore
-  // the panel, which is the failure this whole line of work exists to undo.
-  const bos = assessFirewall({ profiles: [], rules: [] })
-  assert.equal(bos.checked, false)
-  assert.equal(bos.problem, false)
-  assert.equal(assessFirewall({}).problem, false)
-  assert.equal(assessFirewall().problem, false)
+test('PowerShell tek kayıt döndürdüğünde de güvenlik duvarı denetlenir', () => {
+  const result = assessFirewall({ profiles: profile, policies: policy, rules: rule(), ports: [8090], program })
+  assert.equal(result.checked, true)
+  assert.equal(result.networks[0].ports[0].status, 'permission-found')
+  assert.equal(result.problem, false)
 })
-
-test('kategorisi bilinmeyen ağ hakkında hüküm verilmez', () => {
-  // Windows reports an empty category while a network is still being identified. That is a
-  // "not yet", not a fault — and the check runs at startup, exactly when that happens.
-  const result = assessFirewall({ profiles: [network('Yeni Ağ', '')], rules: [rule('Rovli Radyo', 'Any')] })
-  assert.equal(result.blocked.length, 1, 'kategori bilinmiyorsa kapsandığı da iddia edilemez')
-  assert.ok(result.message, 'yine de bir şey söylenmeli')
-})
-
-test('hiç kural yokken doğru çözümü söyler', () => {
-  // Two faults that look identical from outside and have opposite fixes. The installer needs
-  // administrator rights to write its rules; if it never got them there is nothing to scope,
-  // and telling this operator to change their network category sends them to the wrong place
-  // entirely — the network is not the problem.
-  const result = assessFirewall({ profiles: [network('Kafe', 'Private')], rules: [] })
+test('IPv4 aralık filtresi bu ağdaki etkin Block kuralını yakalar', () => {
+  const result = assess([rule({ action: 'Block', remoteAddress: ['0.0.0.0-255.255.255.255'] })])
+  assert.equal(result.networks[0].ports[0].status, 'blocked')
   assert.equal(result.problem, true)
-  assert.equal(result.noRulesAtAll, true)
-  assert.match(result.message, /Yönetici olarak çalıştır/)
-  assert.doesNotMatch(result.message, /Özel/, 'ağ kategorisi bu arızanın çözümü değil')
 })
-
-test('kural var ama kapsamıyorsa ağ kategorisi çözümdür', () => {
-  const result = assessFirewall({
-    profiles: [network('Kafe', 'Public')],
-    rules: [rule('Rovli Radyo', 'Private')]
-  })
-  assert.equal(result.noRulesAtAll, false)
-  assert.match(result.message, /Özel/)
-})
-
-test('yalnızca kapalı kural varken de "izin yok" denir', () => {
-  // A disabled rule is not a rule. But it is also not "never installed" — this is the case
-  // where someone turned it off, so the honest reading is still that no permission exists.
-  const result = assessFirewall({
-    profiles: [network('Kafe', 'Private')],
-    rules: [{ displayName: 'Rovli Radyo', profile: 'Any', enabled: false, action: 'Allow' }]
-  })
-  assert.equal(result.noRulesAtAll, true)
+test('noktalı IPv4 netmask filtresi doğru eşleşir', () => {
+  const result = assess([rule({ action: 'Block', remoteAddress: ['192.168.1.0/255.255.255.0'] })])
+  assert.equal(result.networks[0].ports[0].status, 'blocked')
+  assert.equal(result.problem, true)
 })

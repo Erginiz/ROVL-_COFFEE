@@ -20,7 +20,7 @@
 # gelen veri bozulabilir, bizim yazdigimiz bozulmamali.
 # Sozdizimi Windows PowerShell 5.1'e gore: ternary yok, ??' yok, -SkipCertificateCheck yok.
 
-param([switch]$Test)
+param([switch]$Test, [ValidateRange(0,65535)][int]$Port = 0)
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -37,7 +37,8 @@ $ErrorActionPreference = 'SilentlyContinue'
 function Test-RuleCoversCategory {
   param([string]$RuleProfile, [string]$Category)
   if (-not $Category) { return $false }
-  if ($RuleProfile -eq 'Any' -or $RuleProfile -eq '') { return $true }
+  if ($RuleProfile -eq 'Any') { return $true }
+  if (-not $RuleProfile) { return $false }
   # Kategori adi 'DomainAuthenticated', guvenlik duvari ayni seye 'Domain' diyor.
   if ($Category -eq 'DomainAuthenticated') { return ($RuleProfile -match '\bDomain\b') }
   # Kelime siniri: 'Public' baska bir profil adinin icinde bulunmasin, virgullu liste
@@ -52,14 +53,14 @@ function Get-Verdicts {
   $v = New-Object Collections.ArrayList
 
   if (-not $F.appRunning) {
-    [void]$v.Add(@{ L='!!'; T="Rovli Radyo calismiyor - $($F.port) portunu kimse dinlemiyor."
-                    F='Programi acin, sonra bu betigi tekrar calistirin.' })
+    [void]$v.Add(@{ L='!!'; T="Rovli Radyo yaniti $($F.port) portunda dogrulanamadi."
+                    F='Programi ve portu kontrol edin; farkli port icin -Port 8091 kullanilabilir. Dinleyen PID baska bir programa ait olabilir.' })
     return $v   # program kapaliyken geri kalan her sey anlamsiz
   }
 
   if ($F.listenerPids.Count -gt 1) {
-    [void]$v.Add(@{ L='!!'; T="Ayni portu $($F.listenerPids.Count) AYRI program dinliyor - iki kopya birden calisiyor."
-                    F='Gorev Yoneticisi''nden tum kopyalari kapatip programi bir kez acin.'
+    [void]$v.Add(@{ L='??'; T="Ayni portu $($F.listenerPids.Count) AYRI program dinliyor; soket adresleri ve program yollarini kontrol edin."
+                    F='Bunlarin Rovli kopyalari oldugu dogrulanmadan surec kapatmayin.'
                     Fix='kopya' })
   }
 
@@ -68,15 +69,24 @@ function Get-Verdicts {
                     F='Bu bir sunucu tarafi arizasi. Ciktiyi gonderin.' })
   }
 
-  if ($F.rules.Count -eq 0) {
-    [void]$v.Add(@{ L='!!'; T='Windows guvenlik duvarinda bu programa ait ACIK bir izin yok.'
-                    F='Kurulum yonetici hakki almadan yapilmis olabilir.'
-                    Fix='kural-ekle' })
+  if ($F.state -and $F.state.network.firewall -and $F.state.network.firewall.problem) {
+    [void]$v.Add(@{ L='!!'; T=[string]$F.state.network.firewall.message
+                    F='Uygulamanin etkin port/program kurali denetimini inceleyin. Bu, telefondan yapilmis erisim testi degildir.' })
+  } elseif ($F.rules.Count -eq 0) {
+    [void]$v.Add(@{ L='??'; T='Rovli adli ACIK bir izin yok; baska adli kurallar veya kapali firewall olabilir.'
+                    F='Bu isim denetimi erisim engeli kaniti degildir. Etkin port ve program filtrelerini kontrol edin.' })
   } elseif ($F.uncovered.Count -gt 0) {
     $adlar = ($F.uncovered | ForEach-Object { "'$($_.Name)' ($($_.NetworkCategory))" }) -join ', '
-    [void]$v.Add(@{ L='!!'; T="Izin var ama su agi KAPSAMIYOR: $adlar"
-                    F='Ag "Ozel" yapilmali ya da kural tum profillere acilmali.'
-                    Fix='kural-genislet' })
+    [void]$v.Add(@{ L='??'; T="Ismi eslesen izinlerin profili su agi KAPSAMIYOR: $adlar"
+                    F='Diger etkin kurallar incelenmeden ag turunu degistirmeyin; bu yalnizca profil gozlemidir.' })
+  }
+
+  # HTTPS is a separate listener. HTTP can be perfectly healthy while the secure page
+  # (required by browser microphone permissions and LAN admin login) is dead.
+  if ($F.state -and $F.state.network.https -and -not $F.state.network.https.listening) {
+    $detay = if ($F.state.network.https.error) { [string]$F.state.network.https.error } else { 'HTTPS portu dinlenmiyor.' }
+    [void]$v.Add(@{ L='!!'; T='HTTPS yonetici/mikrofon sayfasi kullanilamiyor.'
+                    F=$detay + ' Sertifika, port ve Rovli Radyo HTTPS kuralini kontrol edin.' })
   }
 
   if ($F.apipaOnly) {
@@ -91,8 +101,8 @@ function Get-Verdicts {
   }
 
   if ($F.neighborsOnSubnet -eq 0 -and $F.lanIps.Count -gt 0) {
-    [void]$v.Add(@{ L='??'; T='Istasyonun agindaki baska hicbir cihaz gorunmuyor.'
-                    F='Telefonlar buyuk olasilikla BASKA bir aga bagli.' })
+    [void]$v.Add(@{ L='??'; T='Komsu onbelleginde baska hicbir cihaz kaydi yok.'
+                    F='Onbellek ag envanteri degildir. Telefon dogru agda olsa da henuz kaydi olmayabilir.' })
   }
 
   if ($F.thirdPartyFw.Count -gt 0) {
@@ -123,18 +133,17 @@ function Get-Verdicts {
   $hicUlasan = $true
   if ($F.state) { $hicUlasan = (@($F.reachedVia).Count -eq 0) }
   if (-not $engel -and $hicUlasan) {
-    [void]$v.Add(@{ L='??'; T='Sunucu tarafinda bir sorun bulunamadi ama hicbir telefon hic ulasmamis.'
+    [void]$v.Add(@{ L='??'; T='Yaklasik son on dakikada bu istasyona ulasmis telefon kaydi yok; neden henuz dogrulanmadi.'
                     F=@'
-Geriye su uc olasilik kaliyor:
-      1) Telefonlar baska bir Wi-Fi agina bagli (iki router varsa en olasi bu)
-      2) Misafir agi kullaniliyor - misafir aglari yerel cihazlara erisimi keser
-      3) Router'da "istemci izolasyonu / AP isolation" acik - ayni agdaki cihazlar
-         birbirini goremez. Router arayuzunde bu ayari kapatin.
+Telefon ve PC IP/maske/ag gecidi, denenen URL ve router WAN/LAN baglantisini karsilastirin.
+Farkli ag, misafir agi, AP isolation, ikinci DHCP, cakisan IP/alt ag, yonlendirme ve
+guvenlik yazilimi ayri olasiliklardir. Bu bilgisayardaki test bunlari birbirinden ayiramaz.
+Router ayari degistirmeden once telefondaki ayni denemenin PC'ye gelip gelmedigini inceleyin.
 '@ })
   }
 
   if ($v.Count -eq 0) {
-    [void]$v.Add(@{ L='OK'; T='Kontrol edilen her sey normal gorunuyor.'; F='' })
+    [void]$v.Add(@{ L='OK'; T='Bu olcumlerde belirgin hata gorulmedi; telefondan erisim ayrica dogrulanmali.'; F='' })
   }
   return $v
 }
@@ -154,6 +163,38 @@ function Get-NetworkBase {
     }
     return ($out -join '.')
   } catch { return $null }
+}
+
+# Keep discovery and action handling testable without sockets or Windows mutations.
+function Get-StationPortCandidates {
+  param([int]$ExplicitPort, [string]$EnvironmentPort, $Connections = @(), $Processes = @())
+  $candidates = New-Object Collections.ArrayList
+  if ($ExplicitPort -gt 0) { [void]$candidates.Add($ExplicitPort) }
+  $envPortNumber = 0
+  if ([int]::TryParse($EnvironmentPort, [ref]$envPortNumber) -and $envPortNumber -gt 0 -and $envPortNumber -le 65535) { [void]$candidates.Add($envPortNumber) }
+  $owners = @($Processes | Where-Object { ($_.Name + ' ' + $_.ExecutablePath + ' ' + $_.CommandLine) -match 'Rovli|Cafe.Radio|server[\\/]index\.cjs' } | ForEach-Object { [int]$_.ProcessId })
+  foreach ($connection in $Connections) {
+    $ownerPid = 0
+    try { $ownerPid = [int]$connection.OwningProcess } catch { $ownerPid = 0 }
+    if ($owners -contains $ownerPid) { [void]$candidates.Add([int]$connection.LocalPort) }
+  }
+  [void]$candidates.Add(8090)
+  return @($candidates | Select-Object -Unique)
+}
+function Invoke-CheckedAction {
+  param([scriptblock]$Action)
+  $ErrorActionPreference = 'Stop'
+  try { & $Action | Out-Null; return @{ Succeeded=$true; Error=$null } }
+  catch { return @{ Succeeded=$false; Error=$_.Exception.Message } }
+}
+function Get-OldestInstance {
+  param($InstanceIds, [scriptblock]$ReadProcess = { param($id) Get-Process -Id $id -ErrorAction Stop })
+  $oldest = $null
+  foreach ($instancePid in $InstanceIds) {
+    try { $candidate = & $ReadProcess $instancePid } catch { continue }
+    if ($candidate -and (-not $oldest -or $candidate.StartTime -lt $oldest.StartTime)) { $oldest = $candidate }
+  }
+  return $oldest
 }
 
 # ==============================================================================
@@ -216,7 +257,7 @@ if ($Test) {
 
   # Her sey temiz ve hicbir telefon ulasmamis: geriye kalani soylemeli.
   $f = $temel.Clone()
-  Iddia 'temiz + ulasan yok -> router/izolasyon olasiligi'  $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'hic ulasmamis' }).Count -gt 0)
+  Iddia 'temiz + ulasan yok -> kesin neden yok'  $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'neden henuz dogrulanmadi' }).Count -gt 0)
 
   # Hukum, uygulamanin SU ANKI reachedVia'sina degil, betigin kendi testinden once alinan
   # listeye bakmali. Aksi halde betigin kendi LAN testi "telefon ulasti" sayilir ve rapor
@@ -224,7 +265,21 @@ if ($Test) {
   $f = $temel.Clone()
   $f.reachedVia = @()
   $f.state = @{ network = @{ reachedVia = @(@{ ip = '192.168.1.14' }); ip = '192.168.1.14'; preferredMissing = $false } }
-  Iddia 'betigin kendi testi "telefon ulasti" sayilmaz'  $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'hic ulasmamis' }).Count -gt 0)
+  Iddia 'betigin kendi testi "telefon ulasti" sayilmaz'  $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'neden henuz dogrulanmadi' }).Count -gt 0)
+
+  $ports = @(Get-StationPortCandidates -ExplicitPort 0 -EnvironmentPort '' -Connections @(@{ OwningProcess=71; LocalPort=8123 }) -Processes @(@{ ProcessId=71; Name='Rovli Radyo.exe' }))
+  Iddia 'degisen istasyon portu 8090 olmadan bulunur' 8123 $ports[0]
+  Iddia 'acik port parametresi once gelir' 8124 @(Get-StationPortCandidates -ExplicitPort 8124 -EnvironmentPort '8125')[0]
+  $result = Invoke-CheckedAction { Write-Error 'ornek nonterminating hata' }
+  Iddia 'nonterminating hata basari sayilmaz' $false $result.Succeeded
+  Iddia 'basarili islem dogru bildirilir' $true (Invoke-CheckedAction { }).Succeeded
+  $oldest = Get-OldestInstance @(72,71) { param($id) @{ Id=$id; StartTime=[datetime]'2020-01-01' + [timespan]::FromSeconds($id) } }
+  Iddia 'kopya secimi PID sabitine atama yapmadan calisir' 71 $oldest.Id
+  $f = $temel.Clone(); $f.neighborsOnSubnet = 0
+  Iddia 'bos ARP baska ag kaniti degildir' 0 @((Get-Verdicts $f) | Where-Object { $_.F -match 'buyuk olasilikla BASKA' }).Count
+
+  $f = $temel.Clone(); $f.state = @{ network = @{ https = @{ listening = $false; error = 'ornek HTTPS hatasi' } } }; $f.reachedVia = @()
+  Iddia 'HTTPS kapali -> yonetici/mikrofon sorunu bildirilir' $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'HTTPS yonetici/mikrofon' }).Count -gt 0)
 
   ''
   "SONUC: $gecti gecti, $kaldi kaldi"
@@ -268,9 +323,23 @@ else { Yaz "Yetki      : normal kullanici (teshis eksiksiz, ama DUZELTME yapilam
 #      erisim testinden ONCE alinmali. Test, LAN adresine baglanarak uygulamada "bir telefon
 #      ulasti" kaydi olusturuyor; sonradan okunsa rapor kendi kendini dogrular ve gercek bir
 #      telefon baglanmis gibi gorunurdu. Olcum, olctugu seyi degistirmemeli.
-$port = 8090; $httpsPort = 8443
+$port = if ($Port -gt 0) { $Port } else { 8090 }
+$envPortNumber = 0
+if ($Port -eq 0 -and [int]::TryParse($env:PORT, [ref]$envPortNumber) -and $envPortNumber -gt 0 -and $envPortNumber -le 65535) { $port = $envPortNumber }
+$httpsPort = if ($port -le 64535) { $port + 1000 } else { 8443 }
 $oncekiDurum = $null
-try { $oncekiDurum = Invoke-RestMethod "http://127.0.0.1:8090/api/state" -TimeoutSec 3 } catch { }
+# First try the explicit/environment port. When no port was given, inspect the process's
+# listening sockets before falling back to 8090; the station may deliberately run elsewhere
+# and a dead 8090 must not make the tool report "program kapalı".
+$adayPortlar = @(Get-StationPortCandidates -ExplicitPort $Port -EnvironmentPort $env:PORT `
+  -Connections @(Get-NetTCPConnection -State Listen) `
+  -Processes @(Get-CimInstance Win32_Process | Select-Object ProcessId, Name, ExecutablePath, CommandLine))
+foreach ($aday in $adayPortlar) {
+  try {
+    $probe = Invoke-RestMethod ("http://127.0.0.1:{0}/api/state" -f $aday) -TimeoutSec 3
+    if ($probe) { $oncekiDurum = $probe; $port = [int]$aday; break }
+  } catch { }
+}
 if ($oncekiDurum -and $oncekiDurum.network.port) { $port = [int]$oncekiDurum.network.port }
 if ($oncekiDurum -and $oncekiDurum.network.httpsPort) { $httpsPort = [int]$oncekiDurum.network.httpsPort }
 $ulasanlar = @()
@@ -443,7 +512,7 @@ foreach ($ip in (@('127.0.0.1') + $lanIps)) {
   $tcp = Test-TcpPort $ip $port
   $http = $false
   if ($tcp) {
-    try { $r = Invoke-RestMethod ("http://{0}:{1}/api/state" -f $ip, $port) -TimeoutSec 4; $http = [bool]$r } catch { }
+    try { $r = Invoke-RestMethod ("http://{0}:{1}/api/state" -f $ip, $port) -Headers @{ 'X-Rovli-Diagnostic' = '1' } -TimeoutSec 4; $http = [bool]$r } catch { }
   }
   # HTTPS icin yalnizca TCP: sertifika bu bilgisayara ozel ve kendinden imzali, PowerShell
   # 5.1 onu dogrulayamaz - basarisiz bir TLS el sikismasi burada arizayi degil, beklenen
@@ -482,6 +551,11 @@ if (-not $state) {
   Yaz "Yayin akiyor mu : $($state.capabilities.flowing)  ($($state.capabilities.message))"
   Yaz "Dinleyici       : $($state.listeners)"
   Yaz "Muzik / reklam  : $(@($state.music).Count) / $(@($state.ads).Count)"
+  if ($net.https) {
+    $httpsDurum = if ($net.https.listening) { 'DINLIYOR' } else { 'DINLEMIYOR' }
+    Yaz "HTTPS yonetici  : $($net.https.port) -> $httpsDurum"
+    if ($net.https.error) { Yaz "HTTPS hatasi    : $($net.https.error)" }
+  }
   # Uygulamanin KENDI guvenlik duvari hukmu. Bu mantik iki yerde yasiyor (burada ve
   # server/firewall-check.cjs); ikisi de yazdirilirsa bir ayrisma gorunur olur.
   if ($net.firewall) {
@@ -597,7 +671,10 @@ if ($teklifler.Count -gt 0) {
     }
     function Uygula { param([string]$Aciklama, [scriptblock]$Is, [string]$Komut)
       Write-Host "  Calisacak komut: $Komut"
-      try { & $Is; Yaz "YAPILDI: $Komut"; [void]$script:yapilanlar.Add($Komut); return $true }
+      # PowerShell normally treats a cmdlet error as non-terminating. Without a local Stop
+      # preference New-NetFirewallRule could fail and this function would still print YAPILDI.
+      $ErrorActionPreference = 'Stop'
+      try { & $Is; if (-not $?) { throw "Komut basarisiz oldu" }; Yaz "YAPILDI: $Komut"; [void]$script:yapilanlar.Add($Komut); return $true }
       catch { Yaz "BASARISIZ: $Komut  --> $($_.Exception.Message)"; return $false }
     }
 
@@ -613,12 +690,12 @@ if ($teklifler.Count -gt 0) {
             $pr = Get-Process | Where-Object { $_.ProcessName -match 'Rovli' } | Select-Object -First 1
             if ($pr) { $exe = $pr.Path }
             if ($exe) {
-              Uygula 'program izni' { New-NetFirewallRule -DisplayName 'Rovli Radyo' -Direction Inbound -Action Allow -Program $exe -Profile Any -Enabled True | Out-Null } "New-NetFirewallRule -DisplayName 'Rovli Radyo' -Program '$exe' -Profile Any"
+              Uygula 'program izni' { New-NetFirewallRule -DisplayName 'Rovli Radyo' -Direction Inbound -Action Allow -Program $exe -Profile Any -RemoteAddress LocalSubnet -Enabled True | Out-Null } "New-NetFirewallRule -DisplayName 'Rovli Radyo' -Program '$exe' -Profile Any -RemoteAddress LocalSubnet"
             } else {
               Yaz "  (calisan program bulunamadi - yalnizca port kurallari eklenecek)"
             }
-            Uygula 'http portu' { New-NetFirewallRule -DisplayName "Rovli Radyo HTTP $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -Enabled True | Out-Null } "New-NetFirewallRule -DisplayName 'Rovli Radyo HTTP $port' -Protocol TCP -LocalPort $port -Profile Any"
-            Uygula 'https portu' { New-NetFirewallRule -DisplayName "Rovli Radyo HTTPS $httpsPort" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $httpsPort -Profile Any -Enabled True | Out-Null } "New-NetFirewallRule -DisplayName 'Rovli Radyo HTTPS $httpsPort' -Protocol TCP -LocalPort $httpsPort -Profile Any"
+            Uygula 'http portu' { New-NetFirewallRule -DisplayName "Rovli Radyo HTTP $port" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port -Profile Any -RemoteAddress LocalSubnet -Enabled True | Out-Null } "New-NetFirewallRule -DisplayName 'Rovli Radyo HTTP $port' -Protocol TCP -LocalPort $port -Profile Any -RemoteAddress LocalSubnet"
+            Uygula 'https portu' { New-NetFirewallRule -DisplayName "Rovli Radyo HTTPS $httpsPort" -Direction Inbound -Action Allow -Protocol TCP -LocalPort $httpsPort -Profile Any -RemoteAddress LocalSubnet -Enabled True | Out-Null } "New-NetFirewallRule -DisplayName 'Rovli Radyo HTTPS $httpsPort' -Protocol TCP -LocalPort $httpsPort -Profile Any -RemoteAddress LocalSubnet"
           } else { Yaz "  (atlandi)" }
         }
 
@@ -649,19 +726,19 @@ if ($teklifler.Count -gt 0) {
           Yaz ''
           Yaz "TEKLIF: Fazla kopyalari kapat."
           $enEski = $null
-          foreach ($pid in $dinleyenPidler) {
-            $pr = Get-Process -Id $pid
+          foreach ($dinleyenPid in $dinleyenPidler) {
+            $pr = Get-Process -Id $dinleyenPid
             if ($pr -and (-not $enEski -or $pr.StartTime -lt $enEski.StartTime)) { $enEski = $pr }
           }
           if (-not $enEski) { Yaz "  (surecler okunamadi, atlandi)" ; break }
           Yaz "  Acik kalacak (en once baslayan): $($enEski.ProcessName) PID $($enEski.Id)"
-          foreach ($pid in $dinleyenPidler) {
-            if ($pid -eq $enEski.Id) { continue }
-            $pr = Get-Process -Id $pid
+          foreach ($dinleyenPid in $dinleyenPidler) {
+            if ($dinleyenPid -eq $enEski.Id) { continue }
+            $pr = Get-Process -Id $dinleyenPid
             $ad = if ($pr) { $pr.ProcessName } else { '?' }
-            if (Sor "PID $pid ($ad) kapatilsin mi?") {
-              Uygula 'kopya kapat' { Stop-Process -Id $pid -Force } "Stop-Process -Id $pid -Force"
-            } else { Yaz "  (PID $pid atlandi)" }
+            if (Sor "PID $dinleyenPid ($ad) kapatilsin mi?") {
+              Uygula 'kopya kapat' { Stop-Process -Id $dinleyenPid -Force } "Stop-Process -Id $dinleyenPid -Force"
+            } else { Yaz "  (PID $dinleyenPid atlandi)" }
           }
         }
       }

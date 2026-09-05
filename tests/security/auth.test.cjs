@@ -214,7 +214,10 @@ test('adres değiştirerek kilit atlanabiliyordu — artık toplam deneme sayıl
   // address by Windows, and the LAN address is the second. So the attack is played out the
   // way a real one would be — wait out each address lock and come back — rather than faked.
   const lan = LAN
-  const attempt = host => server.raw('/api/admin/login', 'POST',
+  // Login is deliberately HTTPS-only for a LAN caller.  Send the guesses over the
+  // same TLS endpoint a phone uses; `raw()` would be rejected at the transport guard
+  // before it reaches the rate limiter and would therefore never exercise the brake.
+  const attempt = host => server.secureRaw('/api/admin/login', 'POST',
     JSON.stringify({ code: '000000' }), { 'content-type': 'application/json' }, host)
 
   // Half a dozen rounds of five, alternating addresses and waiting out the per-address lock.

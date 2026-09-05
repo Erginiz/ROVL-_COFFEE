@@ -134,3 +134,26 @@ test('HTTPS üzerinden de yönetici koruması geçerli', { timeout: 120000 }, as
   })
   assert.equal(res.status, 403, 'HTTPS üzerinden de tokensiz kontrol reddedilmeli')
 })
+
+test('LAN yönetici oturumu düz HTTP üzerinden taşınamaz', { skip: lanIp() ? false : 'LAN yok', timeout: 120000 }, async t => {
+  const server = await startServer({ music: [makeTone(6)] })
+  t.after(() => server.stop())
+  const lan = lanIp()
+  const code = (await server.api('/api/admin/code')).json.code
+
+  const plaintextLogin = await server.raw('/api/admin/login', 'POST',
+    JSON.stringify({ code }), { 'Content-Type': 'application/json' }, lan)
+  assert.equal(plaintextLogin.status, 426, 'LAN kod girişi TLS olmadan işlenmemeli')
+
+  const login = await server.api('/api/admin/login', 'POST', { code }, {}, lan)
+  assert.equal(login.status, 200)
+  const token = login.json.token
+  const plaintextControl = await server.raw('/api/control', 'POST',
+    JSON.stringify({ action: 'pause' }), { 'Content-Type': 'application/json', 'x-admin-token': token }, lan)
+  assert.equal(plaintextControl.status, 426, 'LAN tokenı düz HTTP üzerinden kullanılamamalı')
+
+  const secureControl = await server.api('/api/control', 'POST', { action: 'pause' }, { 'x-admin-token': token }, lan)
+  assert.equal(secureControl.status, 200, 'aynı token HTTPS üzerinden çalışmalı')
+  const state = await server.state()
+  assert.equal(state.network.https.listening, true, 'durum HTTPS dinleme bilgisini yayınlamalı')
+})

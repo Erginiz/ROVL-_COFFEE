@@ -9,6 +9,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const http = require('http')
+const https = require('https')
 
 const PROJECT_ROOT = path.join(__dirname, '..', '..')
 const SERVER = path.join(PROJECT_ROOT, 'server', 'index.cjs')
@@ -128,8 +129,9 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
 
   // `host` decides which trust zone the request lands in: 127.0.0.1 is the café PC and
   // bypasses admin auth, the LAN address is treated as an untrusted phone.
-  const raw = (pathname, method = 'GET', payload = null, headers = {}, host = '127.0.0.1') => new Promise((resolve, reject) => {
-    const req = http.request({ host, port, path: pathname, method, headers }, res => {
+  const isLoopback = host => ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(String(host).toLowerCase())
+  const requestOver = (transport, requestPort, pathname, method = 'GET', payload = null, headers = {}, host = '127.0.0.1') => new Promise((resolve, reject) => {
+    const req = transport.request({ host, port: requestPort, path: pathname, method, headers, ...(transport === https ? { rejectUnauthorized: false } : {}) }, res => {
       const chunks = []
       res.on('data', c => chunks.push(c))
       res.on('end', () => {
@@ -146,9 +148,34 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
     req.end()
   })
 
-  const api = (pathname, method = 'GET', body = null, headers = {}, host = '127.0.0.1') =>
-    raw(pathname, method, body ? JSON.stringify(body) : null,
-      { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, host)
+  const raw = (pathname, method = 'GET', payload = null, headers = {}, host = '127.0.0.1') =>
+    requestOver(http, port, pathname, method, payload, headers, host)
+
+  // HTTPS is generated asynchronously after HTTP is ready. Cache one readiness wait so a
+  // security suite making many LAN requests does not open a probe connection for each call.
+  let httpsReady = null
+  const ensureHttps = () => {
+    if (!httpsReady) {
+      httpsReady = waitFor(async () => {
+        try { return (await requestOver(https, port + 1000, '/api/state', 'GET', null, {}, '127.0.0.1')).status === 200 }
+        catch { return false }
+      }, { timeoutMs: 20000, intervalMs: 100, label: 'HTTPS server boot' }).catch(error => { httpsReady = null; throw error })
+    }
+    return httpsReady
+  }
+  const secureRaw = async (pathname, method = 'GET', payload = null, headers = {}, host = '127.0.0.1') => {
+    await ensureHttps()
+    return requestOver(https, port + 1000, pathname, method, payload, headers, host)
+  }
+
+  // Keep the convenient API helper's old signature, but route non-loopback API calls over
+  // TLS. Direct `raw()` remains available for tests that explicitly prove plaintext is
+  // rejected; listener stream tests continue to use HTTP because the stream is public.
+  const api = (pathname, method = 'GET', body = null, headers = {}, host = '127.0.0.1') => {
+    const payload = body ? JSON.stringify(body) : null
+    const requestHeaders = { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }
+    return (isLoopback(host) ? raw : secureRaw)(pathname, method, payload, requestHeaders, host)
+  }
 
   // Minimal multipart/form-data body, so an upload can be tested without pulling in a
   // dependency. Used to prove the server rejects a file the browser labels as audio.
@@ -159,7 +186,8 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
       `Content-Type: ${mimetype}\r\n\r\n`)
     const tail = Buffer.from(`\r\n--${boundary}--\r\n`)
     const payload = Buffer.concat([head, Buffer.from(content), tail])
-    return raw(pathname, 'POST', payload,
+    const request = isLoopback(host) ? raw : secureRaw
+    return request(pathname, 'POST', payload,
       { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': payload.length, ...headers }, host)
   }
 
@@ -193,7 +221,7 @@ async function startServer({ music = [makeTone()], ads = [], corruptMusic = 0, d
   })
 
   const handle = {
-    port, dataDir, proc, api, raw, upload, listen, control: controlRequest,
+    port, dataDir, proc, api, raw, secureRaw, upload, listen, control: controlRequest,
     pid: proc.pid,
     lanIp: lanIp(),
     get output() { return output },
