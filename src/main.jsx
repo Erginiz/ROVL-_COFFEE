@@ -151,9 +151,22 @@ function useStation() {
 // yeniden tamponlamaya ve sesin kesilmesine yol açıyor. Yalnızca telefon uzun süre arka
 // planda kalıp birikim çok büyüdüyse (ekran kilidi) gerçekten atlıyoruz; orada %3 ile
 // yetişmek dakikalar sürerdi.
-const LIVE_EDGE_CATCHUP = 1.0   // sn — bunun üstünde hızlan
-const LIVE_EDGE_OK = 0.5        // sn — bunun altında normale dön
-const LIVE_EDGE_RESYNC = 5.0    // sn — bunun üstünde atlayarak eşitle
+// ÖLÇÜLDÜ, varsayılmadı: `buffered.end() - currentTime` GECİKME DEĞİLDİR. Oynatma
+// kafasının önünde biriken sesin miktarıdır — yani tampon payı. Çalışan istasyonda bu değer
+// sürekli 1.9–4.0 sn arasında salındı ve hiç 0.5'in altına inmedi.
+//
+// Önceki sürüm bunu "canlıdan geride kaldık" okuyup hızı 1.03'e kilitliyordu. %3 hızlı
+// çalmak sesi sunucunun ürettiğinden hızlı tüketir: tampon boşalır (ölçüldü: 0.07 sn),
+// `waiting` yağar, panel "Bağlanıyor…" yazar ve stalled'a dönünce audio.load() ile duyulur
+// bir kesinti olur. Yani kesintiyi önlemesi beklenen kod, kesintiyi kendisi üretiyordu.
+// Sayılar: hız 1.03 iken 12 saniyede 4 kesinti; hız 1'e sabitlenince 74 saniyede 1.
+//
+// Doğru okuma: 2–4 saniyelik pay SAĞLIKLIDIR, jitter'a karşı korumanın ta kendisidir.
+// Hızlanmak ancak harcanacak gerçek bir fazlalık varken güvenlidir.
+const LIVE_EDGE_TARGET = 3      // sn — atlarken geride bırakılacak pay
+const LIVE_EDGE_RELAX = 6       // sn — bunun altında normal hız
+const LIVE_EDGE_CATCHUP = 8     // sn — bunun üstünde fazlalık var, harcanabilir
+const LIVE_EDGE_RESYNC = 20     // sn — bunun üstünde hızlanarak kapatmak dakikalar sürer
 // What to do about a phone that has drifted behind the live edge, as a plain decision. It
 // runs on every listening phone every two seconds and both of its outcomes are audible — a
 // 3% speed-up is a subtly sharp café, a seek is a jump mid-song — and none of it was covered
@@ -162,18 +175,14 @@ const LIVE_EDGE_RESYNC = 5.0    // sn — bunun üstünde atlayarak eşitle
 //
 // Returns null when there is nothing to do, so "leave it alone" is a distinct answer rather
 // than a rate that happens to equal the current one.
-export function liveEdgeAction(behind, currentRate = 1) {
-  if (!Number.isFinite(behind) || behind < 0) return null
-  // Far behind: catching up by playing faster would take minutes and be audible the whole
-  // time. Jump instead, and land slightly behind the edge rather than exactly on it — right
-  // at the edge the next network hiccup underruns the buffer.
-  if (behind > LIVE_EDGE_RESYNC) return { seek: true, rate: 1 }
-  if (behind > LIVE_EDGE_CATCHUP) return { seek: false, rate: 1.03 }
-  // Below the OK mark, always return to normal speed. Without this the phone would stay
-  // slightly fast for as long as it kept drifting in and out of the middle band.
-  if (behind < LIVE_EDGE_OK) return { seek: false, rate: 1 }
-  // Between OK and CATCHUP: deliberately do nothing, so a phone hovering around a threshold
-  // does not flip speed every two seconds.
+export function liveEdgeAction(cushion, currentRate = 1) {
+  if (!Number.isFinite(cushion) || cushion < 0) return null
+  // Devasa pay: telefon arka planda kalmış ve indirmeye devam etmiş olabilir. Bunu %3 ile
+  // eritmek dakikalar sürer (20 sn / 0.03 ≈ 11 dk) ve o süre boyunca ses tiz kalır.
+  if (cushion > LIVE_EDGE_RESYNC) return { seek: true, rate: 1 }
+  if (cushion > LIVE_EDGE_CATCHUP) return { seek: false, rate: 1.03 }
+  if (cushion < LIVE_EDGE_RELAX) return { seek: false, rate: 1 }
+  // Ara bant: eşiğin çevresinde gezinen bir oynatıcı iki saniyede bir hız değiştirmesin.
   return { seek: false, rate: currentRate }
 }
 
@@ -186,7 +195,7 @@ function useLiveEdge(audioRef) {
       const action = liveEdgeAction(edge - audio.currentTime, audio.playbackRate)
       if (!action) return
       try {
-        if (action.seek) audio.currentTime = edge - LIVE_EDGE_OK
+        if (action.seek) audio.currentTime = Math.max(0, edge - LIVE_EDGE_TARGET)
         if (audio.playbackRate !== action.rate) audio.playbackRate = action.rate
       } catch {}
     }, 2000)
