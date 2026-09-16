@@ -118,7 +118,7 @@ function Get-Verdicts {
     }
     # F.reachedVia, betigin kendi erisim testinden ONCE alindi. state.network.reachedVia
     # su an testin kendisini de icerir; onu kullanmak sahte bir "telefon ulasti" uretirdi.
-    $reached = @($F.reachedVia)
+    $reached = @(@($F.reachedVia) | Where-Object { $_ -and $_.ip })
     if ($reached.Count -gt 0) {
       $qrUlasti = $reached | Where-Object { $_.ip -eq $F.state.network.ip }
       if (-not $qrUlasti) {
@@ -131,7 +131,7 @@ function Get-Verdicts {
   # Her sey temizse: geriye kalani SOYLEMEK, "sebep bulunamadi" demekten iyidir.
   $engel = $v | Where-Object { $_.L -eq '!!' }
   $hicUlasan = $true
-  if ($F.state) { $hicUlasan = (@($F.reachedVia).Count -eq 0) }
+  if ($F.state) { $hicUlasan = (@(@($F.reachedVia) | Where-Object { $_ -and $_.ip }).Count -eq 0) }
   if (-not $engel -and $hicUlasan) {
     [void]$v.Add(@{ L='??'; T='Yaklasik son on dakikada bu istasyona ulasmis telefon kaydi yok; neden henuz dogrulanmadi.'
                     F=@'
@@ -265,6 +265,14 @@ if ($Test) {
   $f = $temel.Clone()
   $f.reachedVia = @()
   $f.state = @{ network = @{ reachedVia = @(@{ ip = '192.168.1.14' }); ip = '192.168.1.14'; preferredMissing = $false } }
+  # Kafeden gelen ilk gercek rapor bunu ortaya cikardi: eski surum reachedVia alanini hic
+  # vermiyor, @($null) bir elemanli sayiliyor, bos bir "telefon ulasti" satiri ve yanlis bir
+  # hukum ciktiyordu. Asil dogru hukum ("kimse ulasmamis -> router/izolasyon") susmustu.
+  $f = $temel.Clone(); $f.reachedVia = @($null)
+  $f.state = @{ network = @{ ip = '192.168.68.155'; preferredMissing = $false } }
+  Iddia 'eski surumde alan yokken sahte "ulasti" hukmu cikmaz'  $false (((Get-Verdicts $f) | Where-Object { $_.T -match 'baska adresten ulasmis' }).Count -gt 0)
+  Iddia 'eski surumde alan yokken asil hukum susmaz'  $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'telefon kaydi yok|hic ulasmamis' }).Count -gt 0)
+
   Iddia 'betigin kendi testi "telefon ulasti" sayilmaz'  $true (((Get-Verdicts $f) | Where-Object { $_.T -match 'neden henuz dogrulanmadi' }).Count -gt 0)
 
   $ports = @(Get-StationPortCandidates -ExplicitPort 0 -EnvironmentPort '' -Connections @(@{ OwningProcess=71; LocalPort=8123 }) -Processes @(@{ ProcessId=71; Name='Rovli Radyo.exe' }))
@@ -343,7 +351,10 @@ foreach ($aday in $adayPortlar) {
 if ($oncekiDurum -and $oncekiDurum.network.port) { $port = [int]$oncekiDurum.network.port }
 if ($oncekiDurum -and $oncekiDurum.network.httpsPort) { $httpsPort = [int]$oncekiDurum.network.httpsPort }
 $ulasanlar = @()
-if ($oncekiDurum) { $ulasanlar = @($oncekiDurum.network.reachedVia) }
+# Filtre sart. Eski bir surumde bu alan hic yok; PowerShell 5.1'de @($null) BIR elemanli
+# sayilir ve kafeden gelen ilk gercek raporda tam olarak bu oldu: bos bir "telefon ulasti"
+# satiri basildi, o da yanlis bir hukum uretip asil dogru olani ("kimse ulasmamis") susturdu.
+if ($oncekiDurum) { $ulasanlar = @(@($oncekiDurum.network.reachedVia) | Where-Object { $_ -and $_.ip }) }
 
 # ------------------------------------------------------------------ 1) adaptorler
 Baslik "1) AG ADAPTORLERI"
